@@ -1,0 +1,5 @@
+resources:
+- service_account.yaml
+- role.yaml
+- site_writer_role.yaml
+- zones_configmap.yaml

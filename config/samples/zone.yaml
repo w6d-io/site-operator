@@ -1,0 +1,8 @@
+apiVersion: auth.w6d.io/v1alpha1
+kind: Zone
+metadata:
+  name: dev
+spec:
+  domain: dev.example.com
+  ingressClass: nginx
+  tls: {mode: default}   # dev nginx default cert is *.dev.example.com

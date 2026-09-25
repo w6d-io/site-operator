@@ -1,0 +1,10 @@
+# Mirror of the Zone domains, written by the operator (get/update by name only)
+# and read by the site-operator-hosts admission policy. Created empty here because
+# RBAC cannot restrict create by name.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: site-operator-zones
+  namespace: auth
+data:
+  domains: ""

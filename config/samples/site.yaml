@@ -1,0 +1,25 @@
+apiVersion: auth.w6d.io/v1alpha1
+kind: Site
+metadata:
+  name: payroll
+  namespace: auth
+spec:
+  hosts: [payroll.dev.example.com]
+  # host is one label under Zone dev (dev.example.com): rules only, the zone's
+  # wildcard Ingress serves it
+  upstream: {service: payroll, namespace: payroll, port: 8080}
+  gates:
+  - name: public
+    match: {url: "<https?>://payroll.dev.example.com/<(health|docs)(/.*)?>", methods: [GET]}
+    authenticators: [{handler: noop}]
+    authorizer: {handler: allow}
+  - name: browser
+    match: {url: "<https?>://payroll.dev.example.com/<(?!(health|docs)(/.*)?$).*>", methods: [GET, POST, PUT, PATCH, DELETE]}
+    authenticators: [{handler: cookie_session}]
+    authorizer:
+      handler: remote_json
+      config:
+        remote: http://opa-authz-proxy.auth:8080/v1/data/rbac/allow
+        payload: '{"input":{"sub":"{{ print .Subject }}","object":"{{ .MatchContext.URL.Path }}","action":"{{ .MatchContext.Method }}","app":"payroll"}}'
+    mutators: [{handler: header, config: {headers: {X-User: "{{ print .Subject }}"}}}]
+    errors: [{handler: redirect}]

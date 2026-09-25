@@ -1,0 +1,66 @@
+# The operator works inside the gateway namespace. It reads no Secrets, writes only
+# its own zones ConfigMap (by name), and cannot change a Site's spec (status only).
+# The only cluster-wide grant is reading Zones (cluster-scoped, admin-written).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: site-operator
+  namespace: auth
+rules:
+- apiGroups: [auth.w6d.io]
+  resources: [sites]
+  verbs: [get, list, watch]
+- apiGroups: [auth.w6d.io]
+  resources: [sites/status]
+  verbs: [get, update, patch]
+- apiGroups: [oathkeeper.ory.sh]
+  resources: [rules]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [networking.k8s.io]
+  resources: [ingresses]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [cert-manager.io]
+  resources: [certificates]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [site-operator-zones]
+  verbs: [get, update, patch]
+- apiGroups: ["", events.k8s.io]
+  resources: [events]
+  verbs: [create, patch]
+- apiGroups: [coordination.k8s.io]
+  resources: [leases]
+  verbs: [get, list, watch, create, update, patch, delete]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: site-operator
+  namespace: auth
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: site-operator}
+subjects:
+- {kind: ServiceAccount, name: site-operator, namespace: auth}
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: site-operator-zones
+rules:
+- apiGroups: [auth.w6d.io]
+  resources: [zones]
+  verbs: [get, list, watch]
+- apiGroups: [auth.w6d.io]
+  resources: [zones/status]
+  verbs: [get, update, patch]
+- apiGroups: ["", events.k8s.io]
+  resources: [events]
+  verbs: [create, patch]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: site-operator-zones
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: ClusterRole, name: site-operator-zones}
+subjects:
+- {kind: ServiceAccount, name: site-operator, namespace: auth}

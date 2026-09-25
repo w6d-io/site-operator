@@ -1,0 +1,40 @@
+# Parameters shared by every site ValidatingAdmissionPolicy. Keep them in step with
+# the operator flags (same regexes, same suffixes). Per-env overlays patch this ConfigMap.
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: site-operator-policy
+  namespace: auth
+data:
+  operatorUser: system:serviceaccount:auth:site-operator
+  siteWriterUser: system:serviceaccount:auth:auth-jinbe
+  reservedHosts: auth.dev.example.com,kuma.dev.example.com,jinbe.dev.example.com,api.dev.example.com,grafana.dev.example.com,vault.dev.example.com,superadmin.dev.example.com
+  gatewayService: auth-oathkeeper-proxy
+  gatewayServicePort: http
+  # keys the operator stamps (from --ingress-annotations) plus every key the chart's
+  # Ingresses use on dev-aws-1/auth, auth-dev and prod-aws-1/auth (snapshot:
+  # test/policy/testdata/chart-ingresses.yaml, refresh with hack/render-chart-ingresses.sh);
+  # never auth-url, ssl-passthrough, permanent-redirect, *-snippet, rewrite-target
+  # default-backend is allowed only with the value below (the chart's error page)
+  allowedIngressAnnotations: >-
+    auth.w6d.io/spec-hash,cert-manager.io/cluster-issuer,kubectl.kubernetes.io/last-applied-configuration,
+    nginx.ingress.kubernetes.io/enable-cors,nginx.ingress.kubernetes.io/cors-allow-origin,
+    nginx.ingress.kubernetes.io/cors-allow-credentials,nginx.ingress.kubernetes.io/cors-allow-methods,
+    nginx.ingress.kubernetes.io/cors-allow-headers,nginx.ingress.kubernetes.io/cors-expose-headers,
+    nginx.ingress.kubernetes.io/cors-max-age,nginx.ingress.kubernetes.io/custom-http-errors,
+    nginx.ingress.kubernetes.io/proxy-read-timeout,nginx.ingress.kubernetes.io/proxy-send-timeout,
+    nginx.ingress.kubernetes.io/proxy-body-size,nginx.ingress.kubernetes.io/default-backend
+  allowedDefaultBackend: error-page
+  allowedIngressAnnotationPrefixes: meta.helm.sh/,argocd.argoproj.io/
+  # same regexes as the operator flags; upstreams are always rendered as
+  # <scheme>://<service>.<namespace>.svc.cluster.local:<port>
+  allowedUpstream: '^https?://[a-z]([a-z0-9-]*[a-z0-9])?\.[a-z0-9]([a-z0-9-]*[a-z0-9])?\.svc\.cluster\.local:[0-9]{1,5}$'
+  deniedUpstream: '^https?://(([a-z0-9-]+-)?(kratos-admin|opa|opal-client|opal-server|redis|redis-master|postgres|postgresql|kubernetes)\.|[^/]*:(4434|8181|7002|6379|5432)$)'
+  # who may write maester Rules: the operator and Argo; the GC and namespace
+  # controllers may delete; maester may only update status/finalizers.
+  # system:masters is always allowed.
+  ruleWriters: system:serviceaccount:auth:site-operator,system:serviceaccount:argocd:argocd-application-controller
+  ruleDeleters: system:serviceaccount:kube-system:generic-garbage-collector,system:serviceaccount:kube-system:namespace-controller
+  maesterUsers: system:serviceaccount:auth:auth-oathkeeper-maester
+  # empty: maester sidecar mode (Rules must not name a ConfigMap)
+  rulesConfigMap: ""

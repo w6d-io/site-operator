@@ -1,0 +1,9 @@
+# Everything the operator needs. Per-env overlays patch the manager args and the
+# site-operator-policy ConfigMap together (same regexes, reserved hosts). Zones are
+# cluster-scoped objects created by admins (config/samples/zone.yaml).
+namespace: auth
+resources:
+- ../crd
+- ../rbac
+- ../admission
+- ../manager

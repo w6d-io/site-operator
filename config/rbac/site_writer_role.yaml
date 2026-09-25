@@ -1,0 +1,23 @@
+# jinbe writes Site intent only. It cannot create Ingresses, Rules, Certificates or
+# Services, and it cannot write Site status (the operator owns it).
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: site-writer
+  namespace: auth
+rules:
+- apiGroups: [auth.w6d.io]
+  resources: [sites]
+  verbs: [get, list, watch, create, update, patch, delete]
+- apiGroups: [auth.w6d.io]
+  resources: [sites/status]
+  verbs: [get]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: site-writer-jinbe
+  namespace: auth
+roleRef: {apiGroup: rbac.authorization.k8s.io, kind: Role, name: site-writer}
+subjects:
+- {kind: ServiceAccount, name: auth-jinbe, namespace: auth}

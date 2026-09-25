@@ -1,0 +1,51 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: site-operator
+  namespace: auth
+  labels: {app.kubernetes.io/name: site-operator}
+spec:
+  replicas: 2
+  selector:
+    matchLabels: {app.kubernetes.io/name: site-operator}
+  template:
+    metadata:
+      labels: {app.kubernetes.io/name: site-operator}
+    spec:
+      serviceAccountName: site-operator
+      securityContext:
+        runAsNonRoot: true
+        seccompProfile: {type: RuntimeDefault}
+      containers:
+      - name: manager
+        image: site-operator:latest
+        args:
+        - --leader-elect
+        - --gateway-namespace=auth
+        - --gateway-service=auth-oathkeeper-proxy
+        - --gateway-service-port=http
+        - --reserved-hosts=auth.dev.example.com,kuma.dev.example.com,jinbe.dev.example.com,api.dev.example.com,grafana.dev.example.com,vault.dev.example.com,superadmin.dev.example.com
+        - --ingress-classes=nginx
+        - --ingress-annotations=nginx.ingress.kubernetes.io/proxy-read-timeout=300,nginx.ingress.kubernetes.io/proxy-send-timeout=300,nginx.ingress.kubernetes.io/custom-http-errors=599
+        - --issuers=letsencrypt-prod
+        - --enabled-authenticators=noop,cookie_session,bearer_token,oauth2_introspection
+        - --enabled-authorizers=allow,deny,remote_json
+        - --enabled-mutators=noop,header,hydrator
+        - --enabled-errors=json,redirect
+        - --zones-configmap=site-operator-zones
+        - --gatekit-url=http://gatekit.auth:8080
+        ports:
+        - {name: metrics, containerPort: 8080}
+        - {name: probes, containerPort: 8081}
+        livenessProbe:
+          httpGet: {path: /healthz, port: probes}
+          initialDelaySeconds: 10
+        readinessProbe:
+          httpGet: {path: /readyz, port: probes}
+        resources:
+          requests: {cpu: 20m, memory: 64Mi}
+          limits: {memory: 256Mi}
+        securityContext:
+          allowPrivilegeEscalation: false
+          readOnlyRootFilesystem: true
+          capabilities: {drop: [ALL]}

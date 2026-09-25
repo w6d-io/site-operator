@@ -1,0 +1,5 @@
+resources:
+- bases/auth.w6d.io_sites.yaml
+- bases/auth.w6d.io_zones.yaml
+# The maester Rule CRD normally ships with the oathkeeper-maester chart; include
+# external/oathkeeper.ory.sh_rules.yaml only where maester's chart does not.
