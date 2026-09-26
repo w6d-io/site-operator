@@ -38,3 +38,12 @@ data:
   maesterUsers: system:serviceaccount:auth:auth-oathkeeper-maester
   # empty: maester sidecar mode (Rules must not name a ConfigMap)
   rulesConfigMap: ""
+  # Gateway: versioned Oathkeeper config ConfigMaps are <gatewayConfigPrefix>-<hash8>,
+  # created (immutable) and deleted by the operator only; on gatewayDeployment the
+  # operator may change only the config-hash annotation and the configMap name of
+  # the gatewayConfigVolume volume (to a versioned name)
+  gatewayConfigPrefix: auth-oathkeeper-config
+  gatewayConfigVolume: oathkeeper-config-volume
+  # the chart's config ConfigMap the Deployment mounts before any Gateway (rollback target)
+  gatewayConfigSeed: auth-oathkeeper-config
+  gatewayDeployment: auth-oathkeeper

@@ -13,6 +13,12 @@ rules:
 - apiGroups: [auth.w6d.io]
   resources: [sites/status]
   verbs: [get, update, patch]
+- apiGroups: [auth.w6d.io]
+  resources: [gateways]
+  verbs: [get, list, watch]
+- apiGroups: [auth.w6d.io]
+  resources: [gateways/status]
+  verbs: [get, update, patch]
 - apiGroups: [oathkeeper.ory.sh]
   resources: [rules]
   verbs: [get, list, watch, create, update, patch, delete]
@@ -26,9 +32,30 @@ rules:
   resources: [configmaps]
   resourceNames: [site-operator-zones]
   verbs: [get, update, patch]
+# Gateway: read the chart's base Oathkeeper config; create and delete the
+# versioned config ConfigMaps (RBAC cannot scope create/delete by name: the
+# site-operator-gateway-config policy limits both to <prefix>-<hash8>, created
+# immutable); roll the Oathkeeper Deployment (site-operator-gateway-rollout lets
+# it change only the config-hash annotation and the config volume's ConfigMap).
+# Names follow the --gateway-* flags.
+- apiGroups: [""]
+  resources: [configmaps]
+  verbs: [create, delete]
+- apiGroups: [""]
+  resources: [configmaps]
+  resourceNames: [auth-oathkeeper-config-base]
+  verbs: [get]
+- apiGroups: [apps]
+  resources: [deployments]
+  resourceNames: [auth-oathkeeper]
+  verbs: [get, patch]
 - apiGroups: ["", events.k8s.io]
   resources: [events]
   verbs: [create, patch]
+# RulesLoaded: find the Oathkeeper pods, then read GET :4456/rules on each (no watch, no cache)
+- apiGroups: [""]
+  resources: [pods]
+  verbs: [get, list]
 - apiGroups: [coordination.k8s.io]
   resources: [leases]
   verbs: [get, list, watch, create, update, patch, delete]

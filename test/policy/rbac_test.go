@@ -40,6 +40,11 @@ func TestRBAC(t *testing.T) {
 		{"create", "", "services", "", false},
 		{"get", "", "secrets", "", false},
 		{"create", "", "configmaps", "", false},
+		{"create", "auth.w6d.io", "gateways", "", true},
+		{"update", "auth.w6d.io", "gateways", "", true},
+		{"delete", "auth.w6d.io", "gateways", "", false},
+		{"update", "auth.w6d.io", "gateways", "status", false},
+		{"patch", "apps", "deployments", "", false},
 	}
 	for _, c := range jinbeChecks {
 		if got := can(t, jinbeUser, c.verb, c.group, c.resource, c.sub); got != c.want {
@@ -53,9 +58,22 @@ func TestRBAC(t *testing.T) {
 		{"update", "auth.w6d.io", "sites", "status", true},
 		{"update", "auth.w6d.io", "sites", "", false},
 		{"get", "", "secrets", "", false},
-		{"create", "", "configmaps", "", false},
+		{"create", "", "configmaps", "", true}, // versioned Gateway configs only (admission)
+		{"delete", "", "configmaps", "", true}, // idem
 		{"list", "", "configmaps", "", false},
+		{"get", "", "configmaps", "", false},
 		{"create", "", "services", "", false},
+		// RulesLoaded reads each gateway pod's /rules: list + get, nothing else
+		{"list", "", "pods", "", true},
+		{"get", "", "pods", "", true},
+		{"watch", "", "pods", "", false},
+		{"delete", "", "pods", "", false},
+		{"create", "", "pods", "exec", false},
+		{"get", "", "pods", "log", false},
+		{"update", "auth.w6d.io", "gateways", "", false},
+		{"update", "auth.w6d.io", "gateways", "status", true},
+		{"list", "apps", "deployments", "", false},
+		{"create", "apps", "deployments", "", false},
 	}
 	for _, c := range operatorChecks {
 		if got := can(t, operatorUser, c.verb, c.group, c.resource, c.sub); got != c.want {
@@ -73,7 +91,8 @@ func TestRBAC(t *testing.T) {
 	}
 }
 
-// resourceNames RBAC: the operator may update its zones mirror and no other ConfigMap.
+// resourceNames RBAC: the operator may update its zones mirror and the rendered
+// Oathkeeper config (Gateway), no other ConfigMap.
 func TestOperatorConfigMapScope(t *testing.T) {
 	check := func(name string, want bool) {
 		sar := &authzv1.SubjectAccessReview{Spec: authzv1.SubjectAccessReviewSpec{
@@ -88,6 +107,7 @@ func TestOperatorConfigMapScope(t *testing.T) {
 		}
 	}
 	check("site-operator-zones", true)
-	check("auth-oathkeeper-config", false)
+	check("auth-oathkeeper-config", false)      // the chart's seed: never updated, versioned configs are created
+	check("auth-oathkeeper-config-base", false) // the chart's base config: read only
 	check("site-operator-policy", false)
 }

@@ -65,6 +65,13 @@ func owned(kind, owner string, uid types.UID, ns, name, hash string, labels map[
 	}
 }
 
+// templated is what Oathkeeper compiles and caches under the rule id
+// (remote/remote_json payload, header/cookie/id_token templates).
+type templated struct {
+	Authorizer *okv1.Handler   `json:"authorizer"`
+	Mutators   []*okv1.Handler `json:"mutators"`
+}
+
 // UpstreamURL renders the in-cluster URL of a structured upstream.
 func UpstreamURL(u authv1.Upstream) string {
 	scheme := u.Scheme
@@ -88,8 +95,10 @@ func Upstreams(site *authv1.Site) []authv1.Upstream {
 }
 
 // Rules renders one maester Rule per gate. The name ends with the hash of the
-// rule spec, so any change (a header template in particular, which Oathkeeper
-// caches by rule id) yields a new Rule and a new Oathkeeper rule id.
+// parts Oathkeeper caches by rule id (authorizer and mutator configs hold the
+// payload and header templates), so a template change yields a new Rule and a
+// new rule id (swapped, see README "Rule swaps"), while any other change keeps
+// the name and updates the Rule in place: one maester write, no gap.
 func Rules(site *authv1.Site, cfg *config.Config) []*okv1.Rule {
 	out := make([]*okv1.Rule, 0, len(site.Spec.Gates))
 	ups := Upstreams(site)
@@ -111,8 +120,7 @@ func Rules(site *authv1.Site, cfg *config.Config) []*okv1.Rule {
 			cm := cfg.RulesConfigMap
 			spec.ConfigMapName = &cm
 		}
-		h := Hash(spec)
-		m := meta(site, site.Name+"-"+g.Name+"-"+h, h)
+		m := meta(site, site.Name+"-"+g.Name+"-"+Hash(templated{spec.Authorizer, spec.Mutators}), Hash(spec))
 		m.Labels[GateLabel] = g.Name
 		out = append(out, &okv1.Rule{ObjectMeta: m, Spec: spec})
 	}

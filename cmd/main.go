@@ -4,7 +4,9 @@ package main
 
 import (
 	"flag"
+	"net/http"
 	"os"
+	"time"
 
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
@@ -14,6 +16,7 @@ import (
 
 	"github.com/w6d-io/site-operator/internal/config"
 	"github.com/w6d-io/site-operator/internal/controller"
+	"github.com/w6d-io/site-operator/internal/loaded"
 	"github.com/w6d-io/site-operator/internal/scheme"
 	"github.com/w6d-io/site-operator/internal/validate"
 )
@@ -57,6 +60,11 @@ func main() {
 		Validator: validate.NewGatekit(cfg.GatekitURL),
 		Recorder:  mgr.GetEventRecorderFor("site-operator"),
 	}
+	if cfg.GatewayPods != nil {
+		// pods are read uncached (get/list RBAC only, no watch)
+		r.Loaded = &loaded.Prober{Reader: mgr.GetAPIReader(), Namespace: cfg.GatewayNamespace, Selector: cfg.GatewayPods,
+			Port: cfg.GatewayAPIPort, Timeout: 2 * time.Second, HTTP: &http.Client{}}
+	}
 	if err := r.SetupWithManager(mgr); err != nil {
 		log.Error(err, "unable to set up site controller")
 		os.Exit(1)
@@ -70,6 +78,19 @@ func main() {
 	if err := z.SetupWithManager(mgr); err != nil {
 		log.Error(err, "unable to set up zone controller")
 		os.Exit(1)
+	}
+	if cfg.GatewayDeployment != "" {
+		g := &controller.GatewayReconciler{
+			Client:    mgr.GetClient(),
+			APIReader: mgr.GetAPIReader(),
+			Config:    cfg,
+			Recorder:  mgr.GetEventRecorderFor("site-operator"),
+			Loaded:    r.Loaded,
+		}
+		if err := g.SetupWithManager(mgr); err != nil {
+			log.Error(err, "unable to set up gateway controller")
+			os.Exit(1)
+		}
 	}
 	_ = mgr.AddHealthzCheck("healthz", healthz.Ping)
 	_ = mgr.AddReadyzCheck("readyz", healthz.Ping)

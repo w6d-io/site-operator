@@ -15,11 +15,11 @@ import (
 	"github.com/w6d-io/site-operator/internal/validate"
 )
 
-// readyInputs are the conditions Ready is the conjunction of. RulesLoaded joins
-// once the per-pod probe exists (OP-3).
+// readyInputs are the conditions Ready is the conjunction of.
 var readyInputs = []string{
 	authv1.ConditionValidated,
 	authv1.ConditionRulesSynced,
+	authv1.ConditionRulesLoaded,
 	authv1.ConditionIngressReady,
 	authv1.ConditionCertificateReady,
 }
@@ -53,11 +53,8 @@ func setChildConditions(site *authv1.Site, desired []*okv1.Rule, obs *observed) 
 	} else {
 		setRulesSynced(site, desired, obs.rules)
 	}
-	setCondition(site, authv1.ConditionRulesLoaded, metav1.ConditionUnknown, "NotMeasured",
-		"per-pod loaded check is not implemented yet")
 	setIngressReady(site, obs)
 	setCertificateReady(site, obs)
-	setReady(site)
 }
 
 // setRulesSynced is True once maester acknowledged every rendered Rule

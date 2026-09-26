@@ -4,3 +4,4 @@ resources:
 - hosts_policy.yaml
 - ingress_policy.yaml
 - rule_policy.yaml
+- gateway_policy.yaml

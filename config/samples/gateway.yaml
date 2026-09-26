@@ -1,0 +1,34 @@
+# The global Oathkeeper handlers (one per gateway namespace, named default).
+# Handlers left out are disabled; secrets never go here (chart env from a Secret).
+apiVersion: auth.w6d.io/v1alpha1
+kind: Gateway
+metadata:
+  name: default
+  namespace: auth
+spec:
+  authenticators:
+    noop: {enabled: true}
+    cookie_session:
+      enabled: true
+      config: {check_session_url: "http://auth-kratos-public.auth/sessions/whoami", preserve_path: true}
+    bearer_token:
+      enabled: true
+      config: {check_session_url: "http://auth-kratos-public.auth/sessions/whoami"}
+    oauth2_introspection:
+      enabled: true
+      config: {introspection_url: "http://auth-hydra-admin.auth:4445/admin/oauth2/introspect"}
+  authorizers:
+    allow: {enabled: true}
+    deny: {enabled: true}
+    remote_json:
+      enabled: true
+      config: {remote: "http://opa-authz-proxy.auth:8080/v1/data/rbac/allow", payload: "{}"}
+  mutators:
+    noop: {enabled: true}
+    header: {enabled: true, config: {headers: {X-User: "{{ print .Subject }}"}}}
+    hydrator: {enabled: true, config: {api: {url: "http://auth-jinbe.auth:8080/api/hydrate"}}}
+  errors:
+    fallback: [redirect, json]
+    handlers:
+      json: {enabled: true, config: {verbose: false}}
+      redirect: {enabled: true, config: {to: "https://auth.dev.example.com/login"}}

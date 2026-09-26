@@ -92,6 +92,32 @@ func TestRuleNameChangesWithMutatorTemplate(t *testing.T) {
 	if again[1].Name != after[1].Name {
 		t.Errorf("render not deterministic")
 	}
+	s.Spec.Gates[1].Authorizer.Config = raw(`{"remote":"http://opa-authz-proxy.auth:8080/v1/data/rbac/allow","payload":"{\"app\":\"payroll2\"}"}`)
+	if Rules(s, cfg)[1].Name == after[1].Name {
+		t.Errorf("an authorizer payload is a template too: the rule must be renamed")
+	}
+}
+
+// Changes Oathkeeper does not cache by rule id keep the Rule name, so the Rule
+// is updated in place: one maester write, no window without (or with two) rules.
+func TestRuleNameStableWithoutTemplateChange(t *testing.T) {
+	cfg := config.Default()
+	s := testSite()
+	before := Rules(s, cfg)
+	s.Spec.Gates[1].Match.URL = "<https?>://payroll.dev.example.com/<(?!(health|docs|metrics)(/.*)?$).*>"
+	s.Spec.Gates[1].Match.Methods = []string{"GET"}
+	s.Spec.Gates[1].Authenticators = []authv1.Handler{{Handler: "bearer_token"}}
+	s.Spec.Gates[1].Errors = []authv1.Handler{{Handler: "json"}}
+	s.Spec.Upstream.Port = 9090
+	after := Rules(s, cfg)
+	for i := range before {
+		if before[i].Name != after[i].Name {
+			t.Errorf("gate %d renamed without a template change: %s -> %s", i, before[i].Name, after[i].Name)
+		}
+	}
+	if before[1].Annotations[SpecHashAnnotation] == after[1].Annotations[SpecHashAnnotation] {
+		t.Errorf("the spec hash must still follow the whole spec (drift detection)")
+	}
 }
 
 func TestRuleConfigMapNameFromConfig(t *testing.T) {

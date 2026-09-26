@@ -30,6 +30,43 @@ exactly one DNS label under a Zone domain (a wildcard certificate covers one lab
 adds a per-site Ingress from the fixed template, with `tls: per-site` for its own Certificate. The operator mirrors the Zone domains into ConfigMap `site-operator-zones`
 (RBAC: update by name only), which the `site-operator-hosts` admission policy reads.
 
+## Gateway (global handlers)
+
+`Gateway` (namespaced singleton `default`, `config/samples/gateway.yaml`) holds the global
+Oathkeeper handler settings kuma edits: `authenticators`, `authorizers`, `mutators`
+(`{<name>: {enabled, config}}`) and `errors: {handlers, fallback}`, every handler of
+Oathkeeper v25.4.0. Handlers left out are disabled. jinbe writes it (no delete); the
+operator:
+
+1. checks every handler config against Oathkeeper's own config schema (vendored
+   `internal/gateway/schema/oathkeeper-v25.4.0.config.schema.json`), the fallback against the
+   enabled error handlers, and refuses secret-looking keys (`client_secret`, `password`, ...:
+   secrets stay in chart env from a Secret) → `Validated=False InvalidConfig`;
+2. refuses to disable a handler any live Rule uses → `Validated=False HandlerInUse`, with the
+   Sites (or `rule/<name>`); `status.inUse` always lists every used handler;
+3. merges the four sections into the chart's base config (`--gateway-base-configmap`, key
+   `--gateway-config-key`; serve, log, access_rules, tracing untouched) and creates an
+   **immutable, versioned** ConfigMap `<--gateway-config-prefix>-<hash8>` (the name is the
+   content hash);
+4. rolls `--gateway-deployment` by pointing its config volume (`--gateway-config-volume`) at
+   that ConfigMap and setting the pod-template annotation `auth.w6d.io/gateway-config-hash`:
+   a real rolling update, pods not yet replaced keep mounting the previous config. Admission
+   lets the operator change nothing else on the Deployment, and create/delete no ConfigMap
+   but versioned ones (created immutable);
+5. waits for every replica updated and Ready, then for every pod to serve every acknowledged
+   Rule (a handler config Oathkeeper rejects drops the Rules using it) → `Rolled`, `Ready`;
+   `status.configMap` / `configHash` / `enabled` then describe what serves;
+6. on `--gateway-rollout-timeout` (5 m) or `ProgressDeadlineExceeded`, points the volume back at
+   the last good config (`status.configMap`; first time: the chart's seed ConfigMap) →
+   `Applied=False RolledBack`, `status.failedHash`; that spec is not retried until it changes;
+7. keeps the newest 3 revisions (`status.revisions`) and deletes older ones, never the one in
+   use or the last good one; the chart's seed is never deleted.
+
+Site validation (`HandlerNotEnabled`) uses the handlers both live (`status.enabled`) and still
+wanted by the spec, so no Site can use a handler before its rollout or while it is being
+disabled; without a rolled-out Gateway the `--enabled-*` flags apply. Deleting the Gateway
+leaves the config as it is.
+
 ## Upstreams
 
 Structured `{service, namespace, port, scheme}`, rendered as
@@ -65,35 +102,53 @@ points at the login UI, not the gateway, and would be refused if enabled.
 
 ## Rule swaps (no 500 window)
 
-Oathkeeper answers 500 when two rules match a request and caches header templates by rule
-id, so a changed gate gets a new Rule name. How maester (sidecar mode) behaves, read from
-`ory/oathkeeper-maester@98a7931 controllers/rule_controller.go`:
+Oathkeeper answers 500 when two rules match a request, and caches the authorizer
+payload and mutator templates by rule id. A Rule name is therefore
+`<site>-<gate>-<hash8 of authorizer + mutators>`:
 
-- one worker; every reconcile lists **all** Rules from its informer cache and rewrites the
-  whole rules file, keeping only Rules with `status.validation.valid == true`;
-- it only drops a Rule from the file in the reconcile of that Rule's own deletion (it holds
-  a finalizer); any other reconcile still writes a Rule that is being deleted if the cache
-  has it. With create-then-delete, the file can hold old + new (500), and a stale write
-  after the deletion can keep the old Rule there until the next unrelated event.
+- **same templates** (routes, methods, upstream, authenticators, errors): the Rule keeps
+  its name and is updated in place — one maester write, no gap (measured: 0 non-200 in
+  30 636 requests across 25 route changes);
+- **changed template**: a new Rule, swapped in three steps inside one reconcile:
+  1. **retire** each Rule no longer wanted: its `match.url` becomes
+     `https://<rule-name>.retired.invalid/` (unique, unroutable) — annotation `auth.w6d.io/retired`;
+  2. **create** the new Rules; 3. **delete** the retired Rules.
 
-The operator therefore swaps in three steps inside one reconcile:
+How maester (sidecar mode, v0.1.14 = `ory/oathkeeper-maester@72046a0`) behaves: one worker
+per pod; every reconcile lists **all** Rules from its informer cache and rewrites the whole
+file, keeping only Rules with `status.validation.valid == true`. The informer delivers the
+three steps in order, so no file holds the new Rule next to a live old one. The cost is a
+short **404** (fail-closed) for the changed gate between the write that retires the old Rule
+and the write that includes the new one (measured on kind, 2 replicas: 0 × 500 in ~30 000
+requests over 25 swaps per run, 404 windows p50 12 ms, p95 28 ms, max 33 ms per pod).
 
-1. **retire** each Rule no longer wanted: its `match.url` becomes
-   `https://<rule-name>.retired.invalid/` (unique, unroutable) — annotation `auth.w6d.io/retired`;
-2. **create** the new Rules;
-3. **delete** the retired Rules.
+Two upstream maester defects, both seen on kind with 2 replicas (fix:
+`hack/maester-sidecar.patch`, to upstream; run a patched image until then):
 
-The informer delivers these events in order, so any file maester writes that contains the
-new Rule already sees the old one retired (or gone); a stale copy of a retired Rule matches
-nothing. The worst case is a short **404** (fail-closed) for the changed gate's URLs,
-between the write that retires the old Rule and the write that includes the new one once
-maester has marked it valid (two maester reconciles, tens of ms). Envtest
-`TestTemplateChangeSwapsRuleSafely` replays a Rule watch and asserts two live Rules for one
-gate never coexist. The measurement against the real maester is task OP-4 / MA-1.
+- the file is written with `os.Create` (truncate, then write): Oathkeeper can read the empty
+  file, which decodes as **zero rules** → gateway-wide 404 blips on every Rule change of any
+  site (16 × 404 on an untouched site over 40 changes). Patch: temp file + rename (0 in 51 000);
+- each replica's sidecar races on the one shared finalizer; the one that loses gets NotFound
+  and does not rewrite its file, so **a deleted Rule stays live on that pod** until the next
+  Rule event (seen: 1 deleted site still served on 1 of 2 pods). Patch: on NotFound, rewrite
+  the file from the cache. Retired Rules lingering this way match nothing.
+
+Envtest `TestTemplateChangeSwapsRuleSafely` replays a Rule watch and asserts two live Rules
+for one gate never coexist; `TestRouteChangeUpdatesRuleInPlace` covers in-place updates.
 
 ## Status
 
+Gateway conditions: `Validated`, `Applied`, `Rolled`, `Ready` (see Gateway above).
+
 Site conditions: `Validated`, `RulesSynced` (maester acknowledged every Rule),
-`RulesLoaded` (Unknown until OP-3's per-pod `:4456/rules` probe), `IngressReady` /
-`CertificateReady` (the Zone's, or the vanity Ingress/Certificate), `Ready`.
+`RulesLoaded`, `IngressReady` / `CertificateReady` (the Zone's, or the vanity
+Ingress/Certificate), `Ready` (all of them).
+
+`RulesLoaded`: the operator lists the Ready pods matching `--gateway-pod-selector` in the
+gateway namespace (pods get/list, uncached, no watch) and reads each pod's
+`GET :<--gateway-api-port>/rules` (paged, 2 s per pod). True once every pod serves every
+rendered rule id with its rendered match URL; the message gives the latency since the rules
+were written. While pods lag it rechecks (20 ms for 1 s, then 500 ms, then 2 s) without
+blocking; after `--rules-loaded-timeout` (60 s) it reports `Timeout` and rechecks every
+30 s. An empty selector disables the probe (`NotChecked`, True).
 `Validated=False` or gatekit unavailable writes nothing and leaves the previous Rules serving.

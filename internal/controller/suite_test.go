@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 
@@ -19,12 +20,14 @@ import (
 
 	authv1 "github.com/w6d-io/site-operator/api/v1alpha1"
 	"github.com/w6d-io/site-operator/internal/config"
+	"github.com/w6d-io/site-operator/internal/loaded"
 	"github.com/w6d-io/site-operator/internal/render"
 	"github.com/w6d-io/site-operator/internal/testenv"
 	"github.com/w6d-io/site-operator/internal/validate"
 )
 
 var (
+	gw     = &fakeGateway{held: map[string]bool{}, calls: map[string]int{}, want: map[string]map[string]string{}}
 	k8s    client.Client
 	cfg    *config.Config
 	watchC client.WithWatch
@@ -43,6 +46,46 @@ func (v *testValidator) Validate(ctx context.Context, cand, others []render.Oath
 	return v.mock.Validate(ctx, cand, others)
 }
 
+// fakeGateway plays two Oathkeeper pods: both serve every Rule maester
+// acknowledged, except the Rules of held sites, which pod b has not loaded yet.
+type fakeGateway struct {
+	mu    sync.Mutex
+	held  map[string]bool
+	calls map[string]int
+	want  map[string]map[string]string
+}
+
+func (g *fakeGateway) Check(_ context.Context, want map[string]string) (loaded.Report, error) {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	for id := range want {
+		i := strings.LastIndex(id, "-")
+		if i < 0 || strings.LastIndex(id[:i], "-") < 0 {
+			continue
+		}
+		site := id[:strings.LastIndex(id[:i], "-")] // <site>-<gate>-<hash8>.auth
+		g.calls[site]++
+		g.want[site] = want
+		if g.held[site] {
+			return loaded.Report{Pods: 2, Loaded: 1, Pending: "ok-b: rule " + id + " not loaded"}, nil
+		}
+	}
+	return loaded.Report{Pods: 2, Loaded: 2}, nil
+}
+
+func (g *fakeGateway) hold(site string)    { g.mu.Lock(); g.held[site] = true; g.mu.Unlock() }
+func (g *fakeGateway) release(site string) { g.mu.Lock(); delete(g.held, site); g.mu.Unlock() }
+func (g *fakeGateway) checks(site string) int {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.calls[site]
+}
+func (g *fakeGateway) lastWant(site string) map[string]string {
+	g.mu.Lock()
+	defer g.mu.Unlock()
+	return g.want[site]
+}
+
 func TestMain(m *testing.M) {
 	env := testenv.New()
 	if env == nil {
@@ -54,6 +97,7 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	cfg = config.Default()
+	cfg.GatewayRolloutTimeout = 2 * time.Second
 	cfg.IngressAnnotations = map[string]string{"nginx.ingress.kubernetes.io/proxy-read-timeout": "300"}
 
 	mgr, err := ctrl.NewManager(rc, ctrl.Options{Scheme: testenv.Scheme(), Metrics: metricsserver.Options{BindAddress: "0"}})
@@ -65,8 +109,14 @@ func TestMain(m *testing.M) {
 		Config:    cfg,
 		Validator: &testValidator{mock: validate.Mock{Invalid: []string{"(("}}},
 		Recorder:  mgr.GetEventRecorderFor("site-operator"),
+		Loaded:    gw,
 	}
 	if err := r.SetupWithManager(mgr); err != nil {
+		panic(err)
+	}
+	g := &GatewayReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: cfg,
+		Recorder: mgr.GetEventRecorderFor("site-operator"), Loaded: gw}
+	if err := g.SetupWithManager(mgr); err != nil {
 		panic(err)
 	}
 	z := &ZoneReconciler{Client: mgr.GetClient(), APIReader: mgr.GetAPIReader(), Config: cfg, Recorder: mgr.GetEventRecorderFor("site-operator")}
@@ -100,6 +150,9 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	if err := setupDevZone(ctx); err != nil {
+		panic(err)
+	}
+	if err := setupGatewayPlatform(ctx); err != nil {
 		panic(err)
 	}
 	code := m.Run()

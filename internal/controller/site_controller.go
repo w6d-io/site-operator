@@ -22,6 +22,7 @@ import (
 	okv1 "github.com/w6d-io/site-operator/api/oathkeeper/v1alpha1"
 	authv1 "github.com/w6d-io/site-operator/api/v1alpha1"
 	"github.com/w6d-io/site-operator/internal/config"
+	"github.com/w6d-io/site-operator/internal/gateway"
 	"github.com/w6d-io/site-operator/internal/render"
 	"github.com/w6d-io/site-operator/internal/validate"
 )
@@ -42,6 +43,10 @@ type SiteReconciler struct {
 	Config    *config.Config
 	Validator validate.Validator
 	Recorder  record.EventRecorder
+	// Loaded probes the gateway pods for RulesLoaded; nil skips the check.
+	Loaded LoadChecker
+
+	clock loadClock
 }
 
 // observed is what the reconcile saw of the children, for the status.
@@ -56,9 +61,13 @@ type observed struct {
 func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
 	site := &authv1.Site{}
 	if err := r.Get(ctx, req.NamespacedName, site); err != nil {
+		if apierrors.IsNotFound(err) {
+			r.clock.forget(req.NamespacedName)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 	if !site.DeletionTimestamp.IsZero() {
+		r.clock.forget(req.NamespacedName)
 		return ctrl.Result{}, nil // ownerReferences garbage-collect the children
 	}
 	kids := children{r.Client, r.Recorder}
@@ -92,16 +101,30 @@ func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	obs.zones = zones.Items
 	setChildConditions(site, desired, obs)
+	recheck := r.setRulesLoaded(ctx, site, desired)
+	setReady(site)
 	if site.Spec.Paused {
 		setCondition(site, authv1.ConditionReady, metav1.ConditionFalse, "Paused", "site is paused; visitors get the paused page")
 	}
-	return ctrl.Result{}, r.writeStatus(ctx, site, obs)
+	if err := r.writeStatus(ctx, site, obs); err != nil {
+		if apierrors.IsConflict(err) {
+			// our cached Site is older than our last status write; the newer
+			// version's watch event (or the recheck) reconciles again
+			return ctrl.Result{RequeueAfter: recheck}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	return ctrl.Result{RequeueAfter: recheck}, nil
 }
 
 // validate runs the static checks and gatekit on the rendered gate Rules. It
 // returns the Rules to write, or nil after recording a refusal in the status.
 func (r *SiteReconciler) validate(ctx context.Context, site *authv1.Site, zones []authv1.Zone) ([]*okv1.Rule, ctrl.Result, error) {
-	if ref := validate.Static(site, r.Config, zones); ref != nil {
+	cfg, err := r.enabledConfig(ctx, site.Namespace)
+	if err != nil {
+		return nil, ctrl.Result{}, err
+	}
+	if ref := validate.Static(site, cfg, zones); ref != nil {
 		return nil, ctrl.Result{}, r.refuse(ctx, site, ref)
 	}
 	desired := render.Rules(site, r.Config)
@@ -133,6 +156,37 @@ func (r *SiteReconciler) refuse(ctx context.Context, site *authv1.Site, ref *val
 	setCondition(site, authv1.ConditionValidated, metav1.ConditionFalse, ref.Reason, ref.Message)
 	setReady(site)
 	return r.writeStatus(ctx, site, nil)
+}
+
+// enabledConfig is the operator config with the handler sets of the Gateway:
+// those live on every pod (status.enabled) that the spec still enables, so a
+// Site can neither use a handler before its rollout nor one being disabled.
+// Without a rolled-out Gateway the flags apply.
+func (r *SiteReconciler) enabledConfig(ctx context.Context, ns string) (*config.Config, error) {
+	gw := &authv1.Gateway{}
+	if err := r.Get(ctx, client.ObjectKey{Namespace: ns, Name: authv1.GatewayName}, gw); err != nil {
+		return r.Config, client.IgnoreNotFound(err)
+	}
+	live := gw.Status.Enabled
+	if live == nil {
+		return r.Config, nil
+	}
+	want := gateway.Enabled(&gw.Spec)
+	both := func(a, b []string) []string {
+		var out []string
+		for _, h := range a {
+			if slices.Contains(b, h) {
+				out = append(out, h)
+			}
+		}
+		return out
+	}
+	c := *r.Config
+	c.EnabledAuthenticators = both(live.Authenticators, want.Authenticators)
+	c.EnabledAuthorizers = both(live.Authorizers, want.Authorizers)
+	c.EnabledMutators = both(live.Mutators, want.Mutators)
+	c.EnabledErrors = both(live.Errors, want.Errors)
+	return &c, nil
 }
 
 // otherRules returns every live Rule in the namespace that this Site does not own.
@@ -226,12 +280,18 @@ func (r *SiteReconciler) applyRule(ctx context.Context, site *authv1.Site, want 
 	if render.Hash(got.Spec) == want.Annotations[render.SpecHashAnnotation] && maps(got.Labels, want.Labels) && maps(got.Annotations, want.Annotations) {
 		return got, nil
 	}
-	// someone edited our Rule: put the rendered spec back (status and finalizers kept)
+	// a change with the same templates (routes, upstream, ...) is updated in place;
+	// the same spec hash means someone edited our Rule: put the rendered spec back.
+	// Status (maester's acknowledgement) and finalizers are kept.
+	reason, msg := "RuleUpdated", "updated Rule %s in place"
+	if got.Annotations[render.SpecHashAnnotation] == want.Annotations[render.SpecHashAnnotation] {
+		reason, msg = "RuleRestored", "restored Rule %s to the rendered spec"
+	}
 	got.Spec, got.Labels, got.Annotations = want.Spec, want.Labels, want.Annotations
 	if err := r.Update(ctx, got); err != nil {
 		return nil, err
 	}
-	r.Recorder.Eventf(site, "Normal", "RuleRestored", "restored Rule %s to the rendered spec", want.Name)
+	r.Recorder.Eventf(site, "Normal", reason, msg, want.Name)
 	return got, nil
 }
 
@@ -302,7 +362,8 @@ func (r *SiteReconciler) pruneExposure(ctx context.Context, kids children, site 
 }
 
 // sitesForZone re-reconciles every Site when a Zone changes (hosts may become
-// valid or invalid, zone readiness feeds the Site conditions).
+// valid or invalid, zone readiness feeds the Site conditions) or the Gateway
+// changes (enabled handlers).
 func (r *SiteReconciler) sitesForZone(ctx context.Context, _ client.Object) []reconcile.Request {
 	var sites authv1.SiteList
 	if err := r.List(ctx, &sites, client.InNamespace(r.Config.GatewayNamespace)); err != nil {
@@ -322,6 +383,7 @@ func (r *SiteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&okv1.Rule{}).
 		Owns(&networkingv1.Ingress{}).
 		Watches(&authv1.Zone{}, handler.EnqueueRequestsFromMapFunc(r.sitesForZone)).
+		Watches(&authv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.sitesForZone)).
 		Named("site")
 	if r.Config.EnableCertificates {
 		cert := &unstructured.Unstructured{}

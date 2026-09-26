@@ -2,6 +2,8 @@ package controller
 
 import (
 	"fmt"
+	"regexp"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,7 +26,7 @@ func TestZoneSiteRendersRulesOnly(t *testing.T) {
 	}
 	site := cond(t, "payroll", authv1.ConditionValidated, metav1.ConditionTrue, "Valid")
 	cond(t, "payroll", authv1.ConditionRulesSynced, metav1.ConditionFalse, "WaitingForMaester")
-	cond(t, "payroll", authv1.ConditionRulesLoaded, metav1.ConditionUnknown, "NotMeasured")
+	cond(t, "payroll", authv1.ConditionRulesLoaded, metav1.ConditionFalse, "WaitingForMaester")
 	cond(t, "payroll", authv1.ConditionIngressReady, metav1.ConditionTrue, "Zone")
 	cond(t, "payroll", authv1.ConditionCertificateReady, metav1.ConditionTrue, "Zone")
 
@@ -43,6 +45,7 @@ func TestZoneSiteRendersRulesOnly(t *testing.T) {
 	}
 
 	ackRules(t, "payroll")
+	cond(t, "payroll", authv1.ConditionRulesLoaded, metav1.ConditionTrue, "Loaded")
 	site = cond(t, "payroll", authv1.ConditionReady, metav1.ConditionTrue, "Ready")
 	if len(site.Status.Children) != 2 {
 		t.Fatalf("want 2 children (rules), got %+v", site.Status.Children)
@@ -135,6 +138,78 @@ func TestTemplateChangeSwapsRuleSafely(t *testing.T) {
 			t.Fatalf("status lists a deleted rule %s", c.Name)
 		}
 	}
+}
+
+// TestRulesLoadedWaitsForEveryPod: maester acknowledged the Rules but one gateway
+// pod has not loaded them yet; the operator polls (no event arrives) and reports
+// the observed latency once every pod serves them.
+func TestRulesLoadedWaitsForEveryPod(t *testing.T) {
+	gw.hold("journal")
+	if err := k8s.Create(ctx, newSite("journal")); err != nil {
+		t.Fatal(err)
+	}
+	cond(t, "journal", authv1.ConditionValidated, metav1.ConditionTrue, "Valid")
+	twoRules(t, "journal")
+	ackRules(t, "journal")
+	site := cond(t, "journal", authv1.ConditionRulesLoaded, metav1.ConditionFalse, "Loading")
+	c := meta.FindStatusCondition(site.Status.Conditions, authv1.ConditionRulesLoaded)
+	if !strings.Contains(c.Message, "1/2 gateway pods") || !strings.Contains(c.Message, "not loaded") {
+		t.Fatalf("message %q", c.Message)
+	}
+	cond(t, "journal", authv1.ConditionReady, metav1.ConditionFalse, "Loading")
+
+	gw.release("journal")
+	site = cond(t, "journal", authv1.ConditionRulesLoaded, metav1.ConditionTrue, "Loaded")
+	c = meta.FindStatusCondition(site.Status.Conditions, authv1.ConditionRulesLoaded)
+	if !regexp.MustCompile(`^2/2 gateway pods loaded the rules, [0-9.]+m?s after they were written$`).MatchString(c.Message) {
+		t.Fatalf("message %q", c.Message)
+	}
+	cond(t, "journal", authv1.ConditionReady, metav1.ConditionTrue, "Ready")
+	if gw.checks("journal") < 2 {
+		t.Fatal("the gateway was not polled")
+	}
+	for id, url := range gw.lastWant("journal") {
+		if !strings.HasSuffix(id, ".auth") || !strings.Contains(url, "journal.dev.example.com") {
+			t.Fatalf("want %s → %s: ids are <rule>.<namespace>, urls the rendered match", id, url)
+		}
+	}
+}
+
+// TestRouteChangeUpdatesRuleInPlace: a change Oathkeeper does not cache by rule
+// id (routes, methods, upstream) keeps the Rule and its maester status: one
+// update event, never a moment with zero or two rules for the gate.
+func TestRouteChangeUpdatesRuleInPlace(t *testing.T) {
+	if err := k8s.Create(ctx, newSite("routes")); err != nil {
+		t.Fatal(err)
+	}
+	cond(t, "routes", authv1.ConditionValidated, metav1.ConditionTrue, "Valid")
+	before := twoRules(t, "routes")
+	ackRules(t, "routes")
+	cond(t, "routes", authv1.ConditionReady, metav1.ConditionTrue, "Ready")
+
+	url := "<https?>://routes.dev.example.com/<(?!(health|docs|metrics)(/.*)?$).*>"
+	updateSite(t, "routes", func(s *authv1.Site) {
+		s.Spec.Gates[1].Match.URL = url
+		s.Spec.Upstream.Port = 9090
+	})
+	eventually(t, "browser rule updated in place", func() error {
+		for _, r := range rulesOf(t, "routes") {
+			if !before[r.Name] || render.Retired(&r) {
+				return fmt.Errorf("rule %s is new or retired; want the same rules %v", r.Name, before)
+			}
+			if r.Labels[render.GateLabel] == "browser" && r.Spec.Match.URL != url {
+				return fmt.Errorf("match still %s", r.Spec.Match.URL)
+			}
+			if r.Spec.Upstream.URL != "http://routes.routes.svc.cluster.local:9090" {
+				return fmt.Errorf("upstream still %s", r.Spec.Upstream.URL)
+			}
+			if r.Status.Validation == nil || r.Status.Validation.Valid == nil || !*r.Status.Validation.Valid {
+				return fmt.Errorf("maester's acknowledgement lost on %s", r.Name)
+			}
+		}
+		return nil
+	})
+	cond(t, "routes", authv1.ConditionReady, metav1.ConditionTrue, "Ready")
 }
 
 func TestPausedSwapsInDenyRules(t *testing.T) {
@@ -241,8 +316,8 @@ func TestRefusedUpdateKeepsServingRules(t *testing.T) {
 	cond(t, "steady", authv1.ConditionValidated, metav1.ConditionFalse, validate.ReasonPatternInvalid)
 	consistently(t, "previous rules untouched", time.Second, func() error {
 		for _, r := range rulesOf(t, "steady") {
-			if !before[r.Name] || render.Retired(&r) {
-				return fmt.Errorf("rules changed: %v -> %s", before, r.Name)
+			if !before[r.Name] || render.Retired(&r) || strings.Contains(r.Spec.Match.URL, "((") {
+				return fmt.Errorf("rules changed: %v -> %s %s", before, r.Name, r.Spec.Match.URL)
 			}
 		}
 		return nil

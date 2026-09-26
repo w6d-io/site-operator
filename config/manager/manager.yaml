@@ -34,6 +34,12 @@ spec:
         - --enabled-errors=json,redirect
         - --zones-configmap=site-operator-zones
         - --gatekit-url=http://gatekit.auth:8080
+        - --gateway-pod-selector=app.kubernetes.io/name=oathkeeper,app.kubernetes.io/instance=auth
+        - --gateway-api-port=4456
+        - --gateway-deployment=auth-oathkeeper
+        - --gateway-config-prefix=auth-oathkeeper-config
+        - --gateway-config-volume=oathkeeper-config-volume
+        - --gateway-base-configmap=auth-oathkeeper-config-base
         ports:
         - {name: metrics, containerPort: 8080}
         - {name: probes, containerPort: 8081}

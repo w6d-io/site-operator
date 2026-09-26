@@ -1,5 +1,6 @@
-# jinbe writes Site intent only. It cannot create Ingresses, Rules, Certificates or
-# Services, and it cannot write Site status (the operator owns it).
+# jinbe writes Site intent and the Gateway (global handler settings) only. It
+# cannot create Ingresses, Rules, Certificates or Services, cannot touch the
+# Oathkeeper config or Deployment, and cannot write status (the operator owns it).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -11,6 +12,12 @@ rules:
   verbs: [get, list, watch, create, update, patch, delete]
 - apiGroups: [auth.w6d.io]
   resources: [sites/status]
+  verbs: [get]
+- apiGroups: [auth.w6d.io]
+  resources: [gateways]
+  verbs: [get, list, watch, create, update, patch]
+- apiGroups: [auth.w6d.io]
+  resources: [gateways/status]
   verbs: [get]
 ---
 apiVersion: rbac.authorization.k8s.io/v1

@@ -1,4 +1,5 @@
 resources:
+- bases/auth.w6d.io_gateways.yaml
 - bases/auth.w6d.io_sites.yaml
 - bases/auth.w6d.io_zones.yaml
 # The maester Rule CRD normally ships with the oathkeeper-maester chart; include

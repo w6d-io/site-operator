@@ -1,0 +1,82 @@
+oathkeeper-maester v0.1.14 (72046a0), sidecar mode: atomic rules-file write +
+rewrite the file when a Rule is already gone (finalizer run by another replica).
+git -C oathkeeper-maester apply ../site-operator/hack/maester-sidecar.patch
+
+diff --git a/controllers/operators.go b/controllers/operators.go
+index e8b5b25..4ea5cca 100644
+--- a/controllers/operators.go
++++ b/controllers/operators.go
+@@ -4,10 +4,10 @@
+ package controllers
+ 
+ import (
+-	"bufio"
+ 	"context"
+ 	"fmt"
+ 	"os"
++	"path/filepath"
+ 
+ 	"github.com/avast/retry-go"
+ 	"github.com/go-logr/logr"
+@@ -118,21 +118,29 @@ func (cmo *ConfigMapOperator) CreateOrUpdate(ctx context.Context, oathkeeperRule
+ }
+ 
+ func (fo *FilesOperator) updateOrCreateRulesFile(ctx context.Context, data string) error {
+-	var f *os.File
+-	f, err := os.Create(fo.RulesFilePath)
++	// write a temp file next to the rules file, then rename it over: a reader
++	// (Oathkeeper's file watcher) never sees a truncated or partial file
++	tmp, err := os.CreateTemp(filepath.Dir(fo.RulesFilePath), "."+filepath.Base(fo.RulesFilePath)+".*")
+ 	if err != nil {
+ 		fo.Log.Error(err, "error while creating config file")
+ 		return err
+ 	}
+-	defer f.Close()
+-	w := bufio.NewWriter(f)
+-	byteCount, err := w.WriteString(data)
+-	fo.Log.Info(fmt.Sprintf("writing %d bytes of data into %s", byteCount, fo.RulesFilePath))
+-	w.Flush()
++	defer os.Remove(tmp.Name())
++	byteCount, err := tmp.WriteString(data)
++	if err == nil {
++		err = tmp.Chmod(0o644)
++	}
++	if cerr := tmp.Close(); err == nil {
++		err = cerr
++	}
++	if err == nil {
++		err = os.Rename(tmp.Name(), fo.RulesFilePath)
++	}
+ 	if err != nil {
+ 		fo.Log.Error(err, "error while writing to file")
+ 		return err
+ 	}
++	fo.Log.Info(fmt.Sprintf("writing %d bytes of data into %s", byteCount, fo.RulesFilePath))
+ 	return nil
+ }
+ 
+diff --git a/controllers/rule_controller.go b/controllers/rule_controller.go
+index 17c5230..afdba58 100644
+--- a/controllers/rule_controller.go
++++ b/controllers/rule_controller.go
+@@ -50,7 +50,19 @@ func (r *RuleReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
+ 
+ 	if err := r.Get(ctx, req.NamespacedName, &rule); err != nil {
+ 		if apierrs.IsNotFound(err) {
+-			// just return here, the finalizers have already run
++			// another replica may have run the finalizer: in sidecar mode every
++			// pod owns its own file, so rewrite it without the deleted rule
++			if _, ok := r.OperatorMode.(*FilesOperator); ok {
++				var rulesList oathkeeperv1alpha1.RuleList
++				if err := r.List(ctx, &rulesList); err != nil {
++					return ctrl.Result{}, err
++				}
++				data, err := rulesList.FilterNotValid().ToOathkeeperRules()
++				if err != nil {
++					return ctrl.Result{}, err
++				}
++				return ctrl.Result{}, r.OperatorMode.CreateOrUpdate(ctx, data, nil)
++			}
+ 			return ctrl.Result{}, nil
+ 		}
+ 		return ctrl.Result{}, err
