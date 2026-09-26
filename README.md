@@ -38,11 +38,15 @@ Ingress (`IngressReady=True PerSite`); each Site under it gets its own exact-hos
 the Zone's Secret, mirrored into `site-operator-zones` key `secrets` for admission).
 
 Before creating a Site's own Ingress (per-site or vanity), the operator checks **every**
-Ingress in the cluster (read-only cluster-wide watch): if one it does not own serves a host,
-exactly or through a wildcard one label above that the exact host would shadow, nothing is
-created and `IngressReady=False HostTaken` names `<namespace>/<name>`; an Ingress of ours that
-already serves is kept, not taken down. This operator's own Zone wildcards are not
-collisions. When the other Ingress goes away the Site's Ingress is created (Ingress watch).
+Ingress in the cluster (read-only cluster-wide watch): if one it does not own serves a host
+**exactly**, nothing is created and `IngressReady=False HostTaken` names `<namespace>/<name>`;
+an Ingress of ours that already serves is kept, not taken down. A **wildcard** one label
+above (e.g. `loki/loki-alloy` `*.dev.example.com` `/collect` on dev-aws-1) is not a
+collision: nginx gives the host to the exact-host server block, so the Site's Ingress is
+created (`IngressReady` stays True) and the warning condition `HostShadowsWildcard=True`
+(not part of Ready, plus a Warning event) says `<ns>/<name> serves *.<parent>; nginx routes
+<host> to this Site (paths of that Ingress, e.g. /collect, are not served on this host)`. This operator's own
+Zone wildcards are ignored. When the other Ingress goes away the Site's Ingress is created (Ingress watch).
 Switching a Zone's mode is handled both ways: to `per-site` the wildcard is deleted and the
 Sites create their Ingresses; to `wildcard` the wildcard is created and the Sites delete
 theirs (expect a short gap while both controllers reconcile). Admission: a `site-*` Ingress

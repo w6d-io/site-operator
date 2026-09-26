@@ -13,6 +13,9 @@ const (
 	ConditionIngressReady     = "IngressReady"
 	ConditionCertificateReady = "CertificateReady"
 	ConditionReady            = "Ready"
+	// ConditionHostShadowsWildcard (a warning, not part of Ready): the Site's own
+	// exact-host Ingress overrides a wildcard Ingress elsewhere for its hosts.
+	ConditionHostShadowsWildcard = "HostShadowsWildcard"
 )
 
 // TLSMode says how HTTPS is served for the Site's hosts.

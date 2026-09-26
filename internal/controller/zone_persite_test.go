@@ -116,22 +116,29 @@ func TestPerSiteZone(t *testing.T) {
 	}
 	ingressCond(t, "beta", metav1.ConditionFalse, "WaitingForAddress", "")
 
-	// a wildcard elsewhere that our exact host would shadow: reported; an
-	// Ingress already serving is kept (not taken down)
+	// a wildcard elsewhere (e.g. loki/loki-alloy *.dev.example.com /collect):
+	// not a collision, our exact host overrides it for that host → warning only
 	wild := foreignIngress(t, "legacy", "wild", "*.shared.example.com")
-	ingressCond(t, "alpha", metav1.ConditionFalse, "HostTaken", "legacy/wild serves alpha.shared.example.com")
-	if _, err := ingressOf("site-alpha"); err != nil {
-		t.Fatalf("an existing site Ingress must be kept: %v", err)
+	s := cond(t, "alpha", authv1.ConditionHostShadowsWildcard, metav1.ConditionTrue, "WildcardShadowed")
+	if c := meta.FindStatusCondition(s.Status.Conditions, authv1.ConditionHostShadowsWildcard); c.Message != "legacy/wild serves *.shared.example.com; nginx routes alpha.shared.example.com to this Site (paths of that Ingress, e.g. /, are not served on this host)" {
+		t.Fatalf("message %q", c.Message)
 	}
+	ingressCond(t, "alpha", metav1.ConditionTrue, "Admitted", "") // IngressReady stays True
+	if err := k8s.Create(ctx, withHost(newSite("gamma"), "gamma.shared.example.com")); err != nil {
+		t.Fatal(err)
+	}
+	ingressCond(t, "gamma", metav1.ConditionFalse, "WaitingForAddress", "") // created despite the wildcard
+	cond(t, "gamma", authv1.ConditionHostShadowsWildcard, metav1.ConditionTrue, "WildcardShadowed")
 	if err := k8s.Delete(ctx, wild); err != nil {
 		t.Fatal(err)
 	}
-	ingressCond(t, "alpha", metav1.ConditionTrue, "Admitted", "")
+	cond(t, "alpha", authv1.ConditionHostShadowsWildcard, metav1.ConditionFalse, "NoWildcard")
 
 	// switch to wildcard: the Zone's wildcard serves, the per-site Ingresses go
 	setZoneMode(t, "shared", authv1.ZoneIngressWildcard)
 	gone(t, "site-alpha")
 	gone(t, "site-beta")
+	gone(t, "site-gamma")
 	if _, err := ingressOf("zone-shared"); err != nil {
 		t.Fatalf("wildcard Ingress: %v", err)
 	}

@@ -55,6 +55,17 @@ func setChildConditions(site *authv1.Site, desired []*okv1.Rule, obs *observed) 
 	}
 	setIngressReady(site, obs)
 	setCertificateReady(site, obs)
+	setHostShadowsWildcard(site, obs)
+}
+
+// setHostShadowsWildcard warns (not part of Ready) that the Site's exact-host Ingress
+// overrides a wildcard Ingress elsewhere for its hosts.
+func setHostShadowsWildcard(site *authv1.Site, obs *observed) {
+	if len(obs.shadowed) == 0 {
+		setCondition(site, authv1.ConditionHostShadowsWildcard, metav1.ConditionFalse, "NoWildcard", "no other wildcard Ingress serves these hosts")
+		return
+	}
+	setCondition(site, authv1.ConditionHostShadowsWildcard, metav1.ConditionTrue, "WildcardShadowed", strings.Join(obs.shadowed, "; "))
 }
 
 // setRulesSynced is True once maester acknowledged every rendered Rule

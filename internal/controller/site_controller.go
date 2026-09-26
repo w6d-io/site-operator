@@ -6,10 +6,12 @@ import (
 	"context"
 	"errors"
 	"slices"
+	"strings"
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/record"
@@ -58,6 +60,9 @@ type observed struct {
 	conflict string
 	// hostTaken names another Ingress serving one of the Site's Ingress hosts.
 	hostTaken string
+	// shadowed lists wildcard Ingresses elsewhere whose paths the Site's exact-host
+	// Ingress overrides for its hosts (a warning, not a refusal).
+	shadowed []string
 	// ownIngress: the Site has its own Ingress (vanity, or hosts under per-site Zones).
 	ownIngress bool
 }
@@ -252,11 +257,15 @@ func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.
 	if want != nil {
 		// never serve a host another Ingress in the cluster already serves: create
 		// nothing (an existing Ingress of ours is kept, not taken down)
-		taken, err := r.hostTaken(ctx, site, hosts)
+		taken, shadowed, err := r.hostCheck(ctx, site, hosts)
 		if err != nil {
 			return nil, err
 		}
-		obs.hostTaken = taken
+		obs.hostTaken, obs.shadowed = taken, shadowed
+		if c := meta.FindStatusCondition(site.Status.Conditions, authv1.ConditionHostShadowsWildcard); len(shadowed) > 0 &&
+			(c == nil || c.Status != metav1.ConditionTrue || c.Message != strings.Join(shadowed, "; ")) {
+			r.Recorder.Event(site, "Warning", "WildcardShadowed", strings.Join(shadowed, "; "))
+		}
 		existing := &networkingv1.Ingress{}
 		err = r.Get(ctx, client.ObjectKeyFromObject(want), existing)
 		if client.IgnoreNotFound(err) != nil {
