@@ -111,3 +111,26 @@ func TestOperatorConfigMapScope(t *testing.T) {
 	check("auth-oathkeeper-config-base", false) // the chart's base config: read only
 	check("site-operator-policy", false)
 }
+
+// Ingresses: read cluster-wide (HostTaken check), write only in the gateway namespace.
+func TestOperatorIngressScope(t *testing.T) {
+	for _, c := range []struct {
+		ns, verb string
+		want     bool
+	}{
+		{"legacy", "list", true}, {"legacy", "watch", true}, {"legacy", "get", true}, {"", "list", true},
+		{"legacy", "create", false}, {"legacy", "update", false}, {"legacy", "delete", false},
+		{"auth", "create", true},
+	} {
+		sar := &authzv1.SubjectAccessReview{Spec: authzv1.SubjectAccessReviewSpec{
+			User: operatorUser, Groups: []string{"system:serviceaccounts", "system:authenticated"},
+			ResourceAttributes: &authzv1.ResourceAttributes{Namespace: c.ns, Verb: c.verb, Group: "networking.k8s.io", Resource: "ingresses"},
+		}}
+		if err := admin.Create(ctx, sar); err != nil {
+			t.Fatal(err)
+		}
+		if sar.Status.Allowed != c.want {
+			t.Errorf("operator %s ingresses in %q: got %v want %v", c.verb, c.ns, sar.Status.Allowed, c.want)
+		}
+	}
+}

@@ -88,7 +88,10 @@ func setRulesSynced(site *authv1.Site, desired, got []*okv1.Rule) {
 
 func setIngressReady(site *authv1.Site, obs *observed) {
 	switch {
-	case !site.Spec.Exposure.Vanity():
+	case obs.hostTaken != "":
+		setCondition(site, authv1.ConditionIngressReady, metav1.ConditionFalse, "HostTaken",
+			"another Ingress already serves this host: "+obs.hostTaken+"; nothing was created")
+	case !obs.ownIngress:
 		st, reason, msg := zoneCondition(site, obs.zones, authv1.ConditionIngressReady)
 		setCondition(site, authv1.ConditionIngressReady, st, reason, msg)
 	case obs.ingress == nil:

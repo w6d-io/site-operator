@@ -30,6 +30,26 @@ exactly one DNS label under a Zone domain (a wildcard certificate covers one lab
 adds a per-site Ingress from the fixed template, with `tls: per-site` for its own Certificate. The operator mirrors the Zone domains into ConfigMap `site-operator-zones`
 (RBAC: update by name only), which the `site-operator-hosts` admission policy reads.
 
+`ingress: per-site` (default `wildcard`) is for a domain other Ingresses in the cluster
+already use (e.g. the sandbox on `dev.example.com`): the Zone renders **no** wildcard
+Ingress (`IngressReady=True PerSite`); each Site under it gets its own exact-host Ingress
+`site-<name>` from the fixed template (backend oathkeeper-proxy), TLS from the Zone
+(`default`: no tls block, the controller's default/wildcard certificate; `secret` / `issuer`:
+the Zone's Secret, mirrored into `site-operator-zones` key `secrets` for admission).
+
+Before creating a Site's own Ingress (per-site or vanity), the operator checks **every**
+Ingress in the cluster (read-only cluster-wide watch): if one it does not own serves a host,
+exactly or through a wildcard one label above that the exact host would shadow, nothing is
+created and `IngressReady=False HostTaken` names `<namespace>/<name>`; an Ingress of ours that
+already serves is kept, not taken down. This operator's own Zone wildcards are not
+collisions. When the other Ingress goes away the Site's Ingress is created (Ingress watch).
+Switching a Zone's mode is handled both ways: to `per-site` the wildcard is deleted and the
+Sites create their Ingresses; to `wildcard` the wildcard is created and the Sites delete
+theirs (expect a short gap while both controllers reconcile). Admission: a `site-*` Ingress
+serves exact hosts one label under a Zone, is controlled by the Site it is named after, and
+uses its own `site-<name>-tls` Secret or a Zone's (the policy cannot read the Site, so the
+host-to-Site match is the operator's).
+
 ## Gateway (global handlers)
 
 `Gateway` (namespaced singleton `default`, `config/samples/gateway.yaml`) holds the global

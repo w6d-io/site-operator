@@ -61,9 +61,8 @@ spec:
     reason: Forbidden
   - expression: >-
       variables.del || !(variables.operator || variables.managed) || !has(object.spec.tls) ||
-      object.spec.tls.all(t, t.hosts.all(h, h in variables.hosts) &&
-        (object.metadata.name.startsWith('zone-') || t.secretName == object.metadata.name + '-tls'))
-    message: a site Ingress uses only its own TLS secret, for its own hosts
+      object.spec.tls.all(t, t.hosts.all(h, h in variables.hosts))
+    message: "an operator Ingress lists TLS only for its own hosts (secret names: site-operator-hosts)"
     reason: Forbidden
 ---
 apiVersion: admissionregistration.k8s.io/v1

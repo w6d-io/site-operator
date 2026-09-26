@@ -56,6 +56,10 @@ type observed struct {
 	cert     *unstructured.Unstructured
 	zones    []authv1.Zone
 	conflict string
+	// hostTaken names another Ingress serving one of the Site's Ingress hosts.
+	hostTaken string
+	// ownIngress: the Site has its own Ingress (vanity, or hosts under per-site Zones).
+	ownIngress bool
 }
 
 func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -92,7 +96,7 @@ func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 		}
 	}
 
-	obs, err := r.apply(ctx, kids, site, desired)
+	obs, err := r.apply(ctx, kids, site, desired, zones.Items)
 	if errors.Is(err, errDeleting) {
 		return ctrl.Result{RequeueAfter: deletingRetry}, nil
 	}
@@ -208,7 +212,7 @@ func (r *SiteReconciler) otherRules(ctx context.Context, site *authv1.Site) ([]r
 // 1. retire every Rule no longer wanted (its match moves to an unroutable host),
 // 2. create the new Rules, 3. delete the retired ones. Watchers (maester) see
 // the retirement before the replacement, so two live Rules never match one URL.
-func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.Site, desired []*okv1.Rule) (*observed, error) {
+func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.Site, desired []*okv1.Rule, zones []authv1.Zone) (*observed, error) {
 	keep := make([]string, 0, len(desired))
 	for _, want := range desired {
 		keep = append(keep, want.Name)
@@ -234,17 +238,45 @@ func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.
 
 	exp := site.Spec.Exposure
 	perSite := exp.Vanity() && exp.TLS == authv1.TLSPerSite
-	if err := r.pruneExposure(ctx, kids, site, exp.Vanity(), perSite); err != nil {
+	hosts, hostZones := ingressHosts(site, zones)
+	var want *networkingv1.Ingress
+	if exp.Vanity() {
+		want = render.Ingress(site, r.Config)
+	} else {
+		want = render.ZoneSiteIngress(site, hosts, hostZones, r.Config)
+	}
+	obs.ownIngress = want != nil
+	if err := r.pruneExposure(ctx, kids, site, want != nil, perSite); err != nil {
 		return nil, err
 	}
-	if exp.Vanity() {
-		ing, err := kids.ingress(ctx, site, render.Ingress(site, r.Config))
-		if errors.Is(err, errConflict) {
-			obs.conflict = "Ingress " + render.IngressName(site)
-		} else if err != nil {
+	if want != nil {
+		// never serve a host another Ingress in the cluster already serves: create
+		// nothing (an existing Ingress of ours is kept, not taken down)
+		taken, err := r.hostTaken(ctx, site, hosts)
+		if err != nil {
 			return nil, err
 		}
-		obs.ingress = ing
+		obs.hostTaken = taken
+		existing := &networkingv1.Ingress{}
+		err = r.Get(ctx, client.ObjectKeyFromObject(want), existing)
+		if client.IgnoreNotFound(err) != nil {
+			return nil, err
+		}
+		switch {
+		case taken != "" && err != nil: // not found: nothing created
+		case taken != "":
+			if metav1.IsControlledBy(existing, site) {
+				obs.ingress = existing
+			}
+		default:
+			ing, err := kids.ingress(ctx, site, want)
+			if errors.Is(err, errConflict) {
+				obs.conflict = "Ingress " + render.IngressName(site)
+			} else if err != nil {
+				return nil, err
+			}
+			obs.ingress = ing
+		}
 	}
 	if perSite {
 		cert, err := kids.certificate(ctx, site, render.Certificate(site, r.Config))
@@ -384,6 +416,7 @@ func (r *SiteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Owns(&networkingv1.Ingress{}).
 		Watches(&authv1.Zone{}, handler.EnqueueRequestsFromMapFunc(r.sitesForZone)).
 		Watches(&authv1.Gateway{}, handler.EnqueueRequestsFromMapFunc(r.sitesForZone)).
+		Watches(&networkingv1.Ingress{}, handler.EnqueueRequestsFromMapFunc(r.sitesForIngress)).
 		Named("site")
 	if r.Config.EnableCertificates {
 		cert := &unstructured.Unstructured{}

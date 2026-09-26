@@ -8,8 +8,10 @@ import (
 	"os"
 	"time"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
@@ -47,8 +49,14 @@ func main() {
 		LeaderElection:          leaderElect,
 		LeaderElectionID:        "site-operator.auth.w6d.io",
 		LeaderElectionNamespace: cfg.GatewayNamespace,
-		// the operator only ever reads and writes the gateway namespace (namespaced Role)
-		Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{cfg.GatewayNamespace: {}}},
+		// the operator reads and writes the gateway namespace (namespaced Role); only
+		// Ingresses are watched cluster-wide (read-only) for the HostTaken check
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{cfg.GatewayNamespace: {}},
+			ByObject: map[client.Object]cache.ByObject{
+				&networkingv1.Ingress{}: {Namespaces: map[string]cache.Config{cache.AllNamespaces: {}}},
+			},
+		},
 	})
 	if err != nil {
 		log.Error(err, "unable to create manager")

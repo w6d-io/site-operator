@@ -60,3 +60,29 @@ func ZoneCertificate(z *authv1.Zone, cfg *config.Config) *unstructured.Unstructu
 	return certificate(func(h string) metav1.ObjectMeta { return zoneMeta(z, cfg, h) },
 		[]string{"*." + z.Spec.Domain}, ZoneSecret(z), ZoneIssuer(z, cfg))
 }
+
+// ZoneSiteIngress is a Site's exact-host Ingress for its hosts under per-site
+// Zones (hosts: host → its Zone, in Site order): the fixed template, backend the
+// gateway, TLS from each Zone's settings (none for mode default). nil when the
+// Site has no such host.
+func ZoneSiteIngress(site *authv1.Site, hosts []string, zones map[string]*authv1.Zone, cfg *config.Config) *networkingv1.Ingress {
+	if len(hosts) == 0 {
+		return nil
+	}
+	var tls []networkingv1.IngressTLS
+	bySecret := map[string]int{}
+	for _, h := range hosts {
+		s := ZoneSecret(zones[h])
+		if s == "" {
+			continue
+		}
+		if i, ok := bySecret[s]; ok {
+			tls[i].Hosts = append(tls[i].Hosts, h)
+			continue
+		}
+		bySecret[s] = len(tls)
+		tls = append(tls, networkingv1.IngressTLS{Hosts: []string{h}, SecretName: s})
+	}
+	spec := ingressSpec(ZoneIngressClass(zones[hosts[0]], cfg), hosts, tls, cfg)
+	return ingress(meta(site, IngressName(site), ingressHash(spec, cfg)), spec, cfg)
+}

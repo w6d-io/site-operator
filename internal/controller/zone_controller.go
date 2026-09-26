@@ -23,8 +23,12 @@ import (
 	"github.com/w6d-io/site-operator/internal/render"
 )
 
-// ZonesDomainsKey is the key of the mirrored ConfigMap read by the admission policy.
-const ZonesDomainsKey = "domains"
+// Keys of the mirrored ConfigMap read by the admission policies: the Zone
+// domains, and the Zone TLS Secrets a per-site Ingress may use.
+const (
+	ZonesDomainsKey = "domains"
+	ZonesSecretsKey = "secrets"
+)
 
 // ZoneReconciler renders one wildcard Ingress (+ Certificate) per Zone and
 // mirrors the Zone domains into a ConfigMap for the admission policy.
@@ -61,6 +65,19 @@ func (r *ZoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	setZoneCondition(zone, authv1.ConditionValidated, metav1.ConditionTrue, "Valid", "zone settings are allowed")
 
+	if zone.Spec.PerSite() {
+		// no wildcard: each Site gets its own exact-host Ingress (after a cluster-wide host check)
+		if err := kids.deleteIngress(ctx, zone, key); err != nil {
+			return ctrl.Result{}, err
+		}
+		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionTrue, "PerSite",
+			"no wildcard Ingress: each Site gets its own exact-host Ingress")
+		if err := r.certificate(ctx, kids, zone, key); err != nil {
+			return ctrl.Result{}, err
+		}
+		setZoneReady(zone)
+		return ctrl.Result{}, errors.Join(r.writeStatus(ctx, zone), mirrorErr)
+	}
 	ing, err := kids.ingress(ctx, zone, render.ZoneIngress(zone, r.Config))
 	switch {
 	case errors.Is(err, errConflict):
@@ -135,14 +152,22 @@ func (r *ZoneReconciler) certificate(ctx context.Context, kids children, zone *a
 // mirror writes the sorted Zone domains into the pre-created ConfigMap. The
 // operator may only get/update that one ConfigMap (RBAC resourceNames).
 func (r *ZoneReconciler) mirror(ctx context.Context, zones []authv1.Zone) error {
-	var domains []string
-	for _, z := range zones {
-		if z.DeletionTimestamp.IsZero() && !slices.Contains(domains, z.Spec.Domain) {
+	var domains, secrets []string
+	for i := range zones {
+		z := &zones[i]
+		if !z.DeletionTimestamp.IsZero() {
+			continue
+		}
+		if !slices.Contains(domains, z.Spec.Domain) {
 			domains = append(domains, z.Spec.Domain)
+		}
+		if s := render.ZoneSecret(z); s != "" && !slices.Contains(secrets, s) {
+			secrets = append(secrets, s)
 		}
 	}
 	slices.Sort(domains)
-	want := strings.Join(domains, ",")
+	slices.Sort(secrets)
+	want := map[string]string{ZonesDomainsKey: strings.Join(domains, ","), ZonesSecretsKey: strings.Join(secrets, ",")}
 	cm := &corev1.ConfigMap{}
 	if err := r.APIReader.Get(ctx, client.ObjectKey{Namespace: r.Config.GatewayNamespace, Name: r.Config.ZonesConfigMap}, cm); err != nil {
 		if apierrors.IsNotFound(err) {
@@ -150,13 +175,15 @@ func (r *ZoneReconciler) mirror(ctx context.Context, zones []authv1.Zone) error 
 		}
 		return err
 	}
-	if cm.Data[ZonesDomainsKey] == want {
+	if cm.Data[ZonesDomainsKey] == want[ZonesDomainsKey] && cm.Data[ZonesSecretsKey] == want[ZonesSecretsKey] {
 		return nil
 	}
 	if cm.Data == nil {
 		cm.Data = map[string]string{}
 	}
-	cm.Data[ZonesDomainsKey] = want
+	for k, v := range want {
+		cm.Data[k] = v
+	}
 	return r.Update(ctx, cm)
 }
 
@@ -177,7 +204,11 @@ func setZoneReady(z *authv1.Zone) {
 			return
 		}
 	}
-	setZoneCondition(z, authv1.ConditionReady, metav1.ConditionTrue, "Ready", "wildcard Ingress admitted and certificate in place")
+	msg := "wildcard Ingress admitted and certificate in place"
+	if z.Spec.PerSite() {
+		msg = "per-site Ingresses; certificate in place"
+	}
+	setZoneCondition(z, authv1.ConditionReady, metav1.ConditionTrue, "Ready", msg)
 }
 
 func (r *ZoneReconciler) writeStatus(ctx context.Context, z *authv1.Zone) error {

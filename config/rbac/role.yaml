@@ -1,6 +1,7 @@
 # The operator works inside the gateway namespace. It reads no Secrets, writes only
 # its own zones ConfigMap (by name), and cannot change a Site's spec (status only).
-# The only cluster-wide grant is reading Zones (cluster-scoped, admin-written).
+# The only cluster-wide grants are reading Zones (cluster-scoped, admin-written)
+# and reading Ingresses (host collision check).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -80,6 +81,11 @@ rules:
 - apiGroups: [auth.w6d.io]
   resources: [zones/status]
   verbs: [get, update, patch]
+# HostTaken: a Site's own Ingress is never created for a host another Ingress
+# in the cluster serves (read-only; Ingress writes stay in the gateway namespace)
+- apiGroups: [networking.k8s.io]
+  resources: [ingresses]
+  verbs: [get, list, watch]
 - apiGroups: ["", events.k8s.io]
   resources: [events]
   verbs: [create, patch]

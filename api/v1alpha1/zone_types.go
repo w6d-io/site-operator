@@ -17,6 +17,18 @@ const (
 	ZoneTLSIssuer ZoneTLSMode = "issuer"
 )
 
+// ZoneIngressMode says how the Zone's hosts reach the gateway.
+// +kubebuilder:validation:Enum=wildcard;per-site
+type ZoneIngressMode string
+
+const (
+	// ZoneIngressWildcard: one wildcard Ingress *.<domain> serves every Site host.
+	ZoneIngressWildcard ZoneIngressMode = "wildcard"
+	// ZoneIngressPerSite: no wildcard Ingress; each Site gets its own exact-host
+	// Ingress, created only when no other Ingress in the cluster serves the host.
+	ZoneIngressPerSite ZoneIngressMode = "per-site"
+)
+
 // ZoneTLS configures HTTPS for every host of the Zone.
 // +kubebuilder:validation:XValidation:rule="self.mode != 'secret' || (has(self.secretName) && size(self.secretName) > 0)",message="mode secret needs secretName"
 type ZoneTLS struct {
@@ -44,7 +56,15 @@ type ZoneSpec struct {
 	// +optional
 	// +kubebuilder:default={mode: default}
 	TLS ZoneTLS `json:"tls,omitempty"`
+	// Ingress is wildcard (default: one *.<domain> Ingress) or per-site (one
+	// exact-host Ingress per Site, for a domain other Ingresses already use).
+	// +optional
+	// +kubebuilder:default=wildcard
+	Ingress ZoneIngressMode `json:"ingress,omitempty"`
 }
+
+// PerSite reports whether each Site under the Zone gets its own Ingress.
+func (s ZoneSpec) PerSite() bool { return s.Ingress == ZoneIngressPerSite }
 
 // ZoneStatus is written by the operator only.
 type ZoneStatus struct {
@@ -60,6 +80,7 @@ type ZoneStatus struct {
 // +kubebuilder:resource:scope=Cluster
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Domain",type=string,JSONPath=`.spec.domain`
+// +kubebuilder:printcolumn:name="Ingress",type=string,JSONPath=`.spec.ingress`
 // +kubebuilder:printcolumn:name="TLS",type=string,JSONPath=`.spec.tls.mode`
 // +kubebuilder:printcolumn:name="Ready",type=string,JSONPath=`.status.conditions[?(@.type=="Ready")].status`
 // +kubebuilder:printcolumn:name="Age",type=date,JSONPath=`.metadata.creationTimestamp`

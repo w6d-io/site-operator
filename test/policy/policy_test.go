@@ -103,12 +103,14 @@ func grantRules(users ...string) error {
 	return admin.Create(ctx, rb)
 }
 
-func setZones(domains string) {
+func setZones(domains string) { setZonesAndSecrets(domains, "") }
+
+func setZonesAndSecrets(domains, secrets string) {
 	cm := &corev1.ConfigMap{}
 	if err := admin.Get(ctx, client.ObjectKey{Namespace: "auth", Name: "site-operator-zones"}, cm); err != nil {
 		panic(err)
 	}
-	cm.Data = map[string]string{"domains": domains}
+	cm.Data = map[string]string{"domains": domains, "secrets": secrets}
 	if err := admin.Update(ctx, cm); err != nil {
 		panic(err)
 	}
@@ -247,7 +249,7 @@ func TestIngressPolicy(t *testing.T) {
 	allowed(t, admin, ingress("auth-oathkeeper-proxy", "auth.dev.example.com", proxy,
 		map[string]string{"meta.helm.sh/release-name": "auth", "nginx.ingress.kubernetes.io/enable-cors": "true"}, nil))
 	allowed(t, operator, ingress("zone-dev", "*.dev.example.com", proxy, map[string]string{"auth.w6d.io/spec-hash": "abcd1234"}, managed))
-	allowed(t, operator, ingress("site-shop", "shop.dev.example.com", proxy, map[string]string{"auth.w6d.io/spec-hash": "abcd1234"}, managed))
+	allowed(t, operator, siteIngress("shop", "shop.dev.example.com", ""))
 	helm := &networkingv1.Ingress{}
 	if err := operator.Get(ctx, client.ObjectKey{Namespace: "auth", Name: "auth-oathkeeper-proxy"}, helm); err != nil {
 		t.Fatal(err)
@@ -255,6 +257,31 @@ func TestIngressPolicy(t *testing.T) {
 	if err := operator.Delete(ctx, helm); err == nil || !strings.Contains(err.Error(), "named site-<name>") {
 		t.Fatalf("operator deleted the chart Ingress: %v", err)
 	}
+}
+
+// siteIngress is a site-<site> Ingress controlled by Site site, with TLS secret (optional).
+func siteIngress(site, host, secret string) *networkingv1.Ingress {
+	ing := ingress("site-"+site, host, "auth-oathkeeper-proxy", map[string]string{"auth.w6d.io/spec-hash": "abcd1234"}, managed)
+	t := true
+	ing.OwnerReferences = []metav1.OwnerReference{{APIVersion: "auth.w6d.io/v1alpha1", Kind: "Site", Name: site, UID: "u1", Controller: &t}}
+	if secret != "" {
+		ing.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{host}, SecretName: secret}}
+	}
+	return ing
+}
+
+// Per-site Ingresses (vanity, or a per-site Zone): exact host under a Zone,
+// controlled by the Site they are named after, own or Zone TLS Secret only.
+func TestSiteIngressPolicy(t *testing.T) {
+	setZonesAndSecrets("dev.example.com", "dev-wildcard")
+	t.Cleanup(func() { setZones("dev.example.com") })
+	denied(t, operator, siteIngress("wild", "*.dev.example.com", ""), "one DNS label under a Zone domain")
+	notOwned := siteIngress("orphan", "orphan.dev.example.com", "")
+	notOwned.OwnerReferences[0].Name = "other"
+	denied(t, operator, notOwned, "named site-<site> and controlled by that Site")
+	denied(t, operator, siteIngress("thief", "thief.dev.example.com", "auth-kratos-tls"), "own TLS Secret or its Zone's")
+	allowed(t, operator, siteIngress("own", "own.dev.example.com", "site-own-tls"))
+	allowed(t, operator, siteIngress("zoned", "zoned.dev.example.com", "dev-wildcard"))
 }
 
 func TestRulePolicy(t *testing.T) {
