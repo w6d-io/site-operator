@@ -1,6 +1,8 @@
 package render
 
 import (
+	"maps"
+
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -23,6 +25,13 @@ const HostRouteLabel = "auth.w6d.io/host-route"
 
 // ZoneListener is the listener name inside a Zone's ListenerSet.
 const ZoneListener = "https"
+
+// ShimIgnoreListenersAnnotation tells cert-manager's gateway-shim to skip the
+// named listeners. A ListenerSet inherits its parent Gateway's issuer annotation
+// (cert-manager.io/cluster-issuer on eg), so without it the shim creates its own
+// Certificate for the Zone Secret next to the operator's (issuer) or over the
+// user's (secret): two Certificates on one Secret re-issue each other forever.
+const ShimIgnoreListenersAnnotation = "cert-manager.io/ignore-tls-listeners"
 
 // HostRouteName names the HTTPRoute of one host (the same name as its host
 // Ingress: another kind, so both live side by side while a Zone migrates).
@@ -73,6 +82,8 @@ func HostRoute(host string, zone *authv1.Zone, cfg *config.Config) *unstructured
 // ZoneListenerSet is the listener a Zone brings to its Gateway when it has its
 // own certificate: *.<domain> on 443 with the Zone TLS Secret, routes from the
 // gateway namespace only. It inherits every Gateway-level policy (WAF, CrowdSec).
+// The Secret is the Zone's own (its Certificate or the user's), never the
+// gateway-shim's: the listener is excluded from the shim.
 func ZoneListenerSet(z *authv1.Zone, cfg *config.Config) *unstructured.Unstructured {
 	gw := z.Spec.Gateway
 	spec := map[string]any{
@@ -85,7 +96,10 @@ func ZoneListenerSet(z *authv1.Zone, cfg *config.Config) *unstructured.Unstructu
 			"allowedRoutes": map[string]any{"namespaces": map[string]any{"from": "Same"}},
 		}},
 	}
-	om := zoneMeta(z, cfg, Hash(spec))
+	shim := map[string]string{ShimIgnoreListenersAnnotation: ZoneListener}
+	// the annotation is in the hash so ListenerSets written before it get it
+	om := zoneMeta(z, cfg, Hash(map[string]any{"spec": spec, "annotations": shim}))
+	maps.Copy(om.Annotations, shim)
 	u := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
 	u.SetGroupVersionKind(ListenerSetGVK)
 	setMeta(u, om)

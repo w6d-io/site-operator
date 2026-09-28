@@ -432,3 +432,62 @@ func TestZoneOwnListener(t *testing.T) {
 		return nil
 	})
 }
+
+// TestZoneListenerNotShimmed: eg carries cert-manager.io/cluster-issuer and a
+// ListenerSet inherits it, so cert-manager's gateway-shim would add its own
+// Certificate on the Zone Secret next to the Zone's (two Certificates on one
+// Secret re-issue each other forever). The ListenerSet opts its listener out of
+// the shim, and a shim Certificate made before that goes; the Zone's stays.
+func TestZoneListenerNotShimmed(t *testing.T) {
+	z := gatewayZoneObj("shim", "shim.example.com", authv1.ZoneIngressNone)
+	z.Spec.TLS = authv1.ZoneTLS{Mode: authv1.ZoneTLSIssuer}
+	createZone(t, z)
+	ls := &unstructured.Unstructured{}
+	ls.SetGroupVersionKind(render.ListenerSetGVK)
+	eventually(t, "zone-shim ListenerSet", func() error {
+		return k8s.Get(ctx, client.ObjectKey{Namespace: "auth", Name: "zone-shim"}, ls)
+	})
+	if a := ls.GetAnnotations()[render.ShimIgnoreListenersAnnotation]; a != render.ZoneListener {
+		t.Fatalf("%s = %q, want %q", render.ShimIgnoreListenersAnnotation, a, render.ZoneListener)
+	}
+	own := &unstructured.Unstructured{}
+	own.SetGroupVersionKind(render.CertificateGVK)
+	eventually(t, "zone-shim Certificate", func() error {
+		return k8s.Get(ctx, client.ObjectKey{Namespace: "auth", Name: "zone-shim"}, own)
+	})
+	if s, _, _ := unstructured.NestedString(own.Object, "spec", "secretName"); s != "zone-shim-tls" {
+		t.Fatalf("secretName %q", s)
+	}
+
+	// what the shim made before the annotation: named after the Secret, controlled by the ListenerSet
+	shim := &unstructured.Unstructured{Object: map[string]any{"spec": map[string]any{
+		"secretName": "zone-shim-tls", "dnsNames": []any{"*.shim.example.com"},
+		"issuerRef": map[string]any{"name": "letsencrypt-prod", "kind": "ClusterIssuer"},
+	}}}
+	shim.SetGroupVersionKind(render.CertificateGVK)
+	shim.SetNamespace("auth")
+	shim.SetName("zone-shim-tls")
+	t.Cleanup(func() { _ = k8s.Delete(ctx, shim) })
+	tr := true
+	shim.SetOwnerReferences([]metav1.OwnerReference{{APIVersion: render.ListenerSetGVK.GroupVersion().String(),
+		Kind: "ListenerSet", Name: ls.GetName(), UID: ls.GetUID(), Controller: &tr}})
+	if err := k8s.Create(ctx, shim); err != nil {
+		t.Fatal(err)
+	}
+	// the next reconcile (the ListenerSet reported by EG) drops it
+	ls.Object["status"] = map[string]any{"conditions": condList("Accepted", "Programmed")}
+	if err := k8s.Status().Update(ctx, ls); err != nil {
+		t.Fatal(err)
+	}
+	eventually(t, "shim Certificate deleted", func() error {
+		got := &unstructured.Unstructured{}
+		got.SetGroupVersionKind(render.CertificateGVK)
+		if err := k8s.Get(ctx, client.ObjectKeyFromObject(shim), got); !apierrors.IsNotFound(err) {
+			return fmt.Errorf("still there: %v", err)
+		}
+		return nil
+	})
+	if err := k8s.Get(ctx, client.ObjectKeyFromObject(own), own); err != nil || own.GetDeletionTimestamp() != nil {
+		t.Fatalf("the Zone's Certificate must stay: %v", err)
+	}
+}

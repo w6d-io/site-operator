@@ -88,6 +88,11 @@ func TestZoneListenerSet(t *testing.T) {
 	if got := js(t, ls.Object["spec"]); got != want {
 		t.Fatalf("spec\n got %s\nwant %s", got, want)
 	}
+	// eg carries cert-manager.io/cluster-issuer and ListenerSets inherit it: the
+	// shim must not add a second Certificate on the Zone Secret
+	if a := ls.GetAnnotations(); a[ShimIgnoreListenersAnnotation] != ZoneListener || a[SpecHashAnnotation] == "" {
+		t.Fatalf("annotations %v", a)
+	}
 	rt := HostRoute("kuma.authdev.dev.example.com", z, cfg)
 	if got := js(t, rt.Object["spec"].(map[string]any)["parentRefs"]); got !=
 		`[{"group":"gateway.networking.k8s.io","kind":"ListenerSet","name":"zone-dev","namespace":"auth","sectionName":"https"}]` {

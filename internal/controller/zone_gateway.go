@@ -80,6 +80,9 @@ func (r *ZoneReconciler) gateway(ctx context.Context, kids children, zone *authv
 	if err != nil {
 		return err
 	}
+	if err := r.dropShimCertificate(ctx, kids, zone, ls); err != nil {
+		return err
+	}
 	if ok, reason, msg := listenerSetReady(ls); !ok {
 		setZoneCondition(zone, authv1.ConditionGatewayReady, metav1.ConditionFalse, reason, "ListenerSet "+key.Name+": "+msg)
 		return nil
@@ -87,6 +90,19 @@ func (r *ZoneReconciler) gateway(ctx context.Context, kids children, zone *authv
 	setZoneCondition(zone, authv1.ConditionGatewayReady, metav1.ConditionTrue, "Programmed",
 		fmt.Sprintf("gateway %s at %s, ListenerSet %s (*.%s)", ref.Key(), at, key.Name, zone.Spec.Domain))
 	return nil
+}
+
+// dropShimCertificate deletes the Certificate cert-manager's gateway-shim made
+// for the Zone's ListenerSet before it carried the shim-ignore annotation (named
+// after the Secret, controlled by the ListenerSet): left alone it keeps fighting
+// the Zone's Certificate over the Secret. Only once the annotation is on, so the
+// shim does not recreate it.
+func (r *ZoneReconciler) dropShimCertificate(ctx context.Context, kids children, zone *authv1.Zone, ls *unstructured.Unstructured) error {
+	if !r.Config.EnableCertificates || ls.GetAnnotations()[render.ShimIgnoreListenersAnnotation] != render.ZoneListener {
+		return nil
+	}
+	// only one the ListenerSet controls: never the Zone's own (Zone-controlled)
+	return kids.deleteCertificate(ctx, ls, client.ObjectKey{Namespace: ls.GetNamespace(), Name: render.ZoneSecret(zone)})
 }
 
 func gatewayProgrammed(gw *unstructured.Unstructured) (bool, string, string) {
