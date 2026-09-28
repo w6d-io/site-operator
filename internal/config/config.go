@@ -46,6 +46,18 @@ type Config struct {
 	GatekitURL string
 	// EnableCertificates watches/writes cert-manager Certificates (needs the CRD).
 	EnableCertificates bool
+	// EnableGatewayAPI watches Gateway API objects and writes HTTPRoutes and
+	// ListenerSets for Zones with a gateway (needs the Gateway API CRDs).
+	EnableGatewayAPI bool
+	// Gateways are the Gateway API Gateways (namespace/name) Zones may attach to:
+	// only ones whose policies put every route behind the WAF and CrowdSec.
+	Gateways []string
+	// GatewayServicePortNumber is the oathkeeper proxy Service port HTTPRoutes use
+	// (a backendRef needs a number, an Ingress takes the name).
+	GatewayServicePortNumber int32
+	// RouteRequestTimeout is the HTTPRoute request timeout (Gateway API duration,
+	// e.g. 300s); empty keeps the Gateway's default.
+	RouteRequestTimeout string
 	// GatewayPods selects the Oathkeeper pods (gateway namespace) whose loaded rules
 	// back RulesLoaded; nil disables the check (RulesLoaded Unknown, Ready not blocked).
 	GatewayPods labels.Selector
@@ -76,6 +88,9 @@ const (
 	DefaultDeniedUpstream = `^https?://(([a-z0-9-]+-)?(kratos-admin|opa|opal-client|opal-server|redis|redis-master|postgres|postgresql|kubernetes)\.|[^/]*:(4434|8181|7002|6379|5432)$)`
 )
 
+// routeDuration is the Gateway API duration format (GEP-2257).
+var routeDuration = regexp.MustCompile(`^([0-9]{1,5}(h|m|s|ms)){1,4}$`)
+
 // Register binds the flags on fs; call Load after fs.Parse.
 func Register(fs *flag.FlagSet) *Raw {
 	r := &Raw{}
@@ -100,6 +115,10 @@ func Register(fs *flag.FlagSet) *Raw {
 	s(&r.PausedRedirectURL, "paused-redirect-url", "", "page browsers see for a paused site (empty: json error only)")
 	s(&r.GatekitURL, "gatekit-url", "http://gatekit:8080", "gatekit base URL")
 	fs.BoolVar(&r.EnableCertificates, "enable-certificates", env("enable-certificates", "true") == "true", "manage cert-manager Certificates")
+	fs.BoolVar(&r.EnableGatewayAPI, "enable-gateway-api", env("enable-gateway-api", "false") == "true", "manage HTTPRoutes and ListenerSets for Zones with a gateway")
+	s(&r.Gateways, "gateways", "", "comma-separated namespace/name of the Gateway API Gateways Zones may attach to")
+	s(&r.GatewayServicePortNumber, "gateway-service-port-number", "4455", "port number of the oathkeeper proxy Service (HTTPRoute backends)")
+	s(&r.RouteRequestTimeout, "route-request-timeout", "300s", "HTTPRoute request timeout (empty: the Gateway default)")
 	s(&r.GatewayPods, "gateway-pod-selector", "app.kubernetes.io/name=oathkeeper,app.kubernetes.io/instance=auth",
 		"label selector of the Oathkeeper pods probed for RulesLoaded (empty: no probe)")
 	s(&r.GatewayAPIPort, "gateway-api-port", "4456", "Oathkeeper API port serving GET /rules")
@@ -125,7 +144,8 @@ type Raw struct {
 	GatewayDeployment, GatewayConfigPrefix, GatewayBaseConfigMap  string
 	GatewayConfigVolume                                           string
 	GatewayConfigKey, GatewayRolloutTimeout                       string
-	EnableCertificates                                            bool
+	Gateways, GatewayServicePortNumber, RouteRequestTimeout       string
+	EnableCertificates, EnableGatewayAPI                          bool
 }
 
 // Load validates and converts the raw flags.
@@ -147,6 +167,9 @@ func (r *Raw) Load() (*Config, error) {
 		GatekitURL:            strings.TrimRight(r.GatekitURL, "/"),
 		PausedRedirectURL:     r.PausedRedirectURL,
 		EnableCertificates:    r.EnableCertificates,
+		EnableGatewayAPI:      r.EnableGatewayAPI,
+		Gateways:              list(r.Gateways),
+		RouteRequestTimeout:   r.RouteRequestTimeout,
 		GatewayDeployment:     r.GatewayDeployment,
 		GatewayConfigPrefix:   r.GatewayConfigPrefix,
 		GatewayConfigVolume:   r.GatewayConfigVolume,
@@ -163,7 +186,22 @@ func (r *Raw) Load() (*Config, error) {
 	if len(c.IngressClasses) == 0 || len(c.Issuers) == 0 {
 		return nil, fmt.Errorf("ingress-classes and issuers must not be empty")
 	}
-	var err error
+	for _, g := range c.Gateways {
+		if ns, name, ok := strings.Cut(g, "/"); !ok || ns == "" || name == "" || strings.Contains(name, "/") {
+			return nil, fmt.Errorf("gateways: %q is not namespace/name", g)
+		}
+	}
+	if c.EnableGatewayAPI && len(c.Gateways) == 0 {
+		return nil, fmt.Errorf("enable-gateway-api needs at least one allowed gateway (--gateways)")
+	}
+	if c.RouteRequestTimeout != "" && !routeDuration.MatchString(c.RouteRequestTimeout) {
+		return nil, fmt.Errorf("route-request-timeout: %q is not a Gateway API duration (e.g. 300s)", c.RouteRequestTimeout)
+	}
+	port, err := strconv.Atoi(r.GatewayServicePortNumber)
+	if err != nil || port < 1 || port > 65535 {
+		return nil, fmt.Errorf("gateway-service-port-number: %q is not a port", r.GatewayServicePortNumber)
+	}
+	c.GatewayServicePortNumber = int32(port)
 	if r.GatewayPods != "" {
 		if c.GatewayPods, err = labels.Parse(r.GatewayPods); err != nil {
 			return nil, fmt.Errorf("gateway-pod-selector: %w", err)

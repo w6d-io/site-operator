@@ -1,0 +1,16 @@
+# Stub of Envoy Gateway's EnvoyExtensionPolicy CRD (no schema): enough for the admission tests.
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  name: envoyextensionpolicies.gateway.envoyproxy.io
+spec:
+  group: gateway.envoyproxy.io
+  names: {kind: EnvoyExtensionPolicy, listKind: EnvoyExtensionPolicyList, plural: envoyextensionpolicies, singular: envoyextensionpolicy}
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    served: true
+    storage: true
+    subresources: {status: {}}
+    schema:
+      openAPIV3Schema: {type: object, x-kubernetes-preserve-unknown-fields: true}

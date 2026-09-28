@@ -67,6 +67,13 @@ type observed struct {
 	ownIngress bool
 	// hostIngresses are the shared per-host Ingresses serving the Site's hosts.
 	hostIngresses []*networkingv1.Ingress
+	// routed: some host is under a Zone with a gateway; routes are its HTTPRoutes.
+	routed bool
+	routes []*unstructured.Unstructured
+	// routeTaken names what already serves one of the Site's routed hosts.
+	routeTaken string
+	// routeRefused: a host's Zone has a gateway the operator may not use.
+	routeRefused string
 }
 
 func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -74,14 +81,14 @@ func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.Get(ctx, req.NamespacedName, site); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.clock.forget(req.NamespacedName)
-			return ctrl.Result{}, r.releaseHosts(ctx, req.Namespace, req.Name, nil)
+			return ctrl.Result{}, r.release(ctx, req.Namespace, req.Name)
 		}
 		return ctrl.Result{}, err
 	}
 	if !site.DeletionTimestamp.IsZero() {
 		r.clock.forget(req.NamespacedName)
-		// ownerReferences garbage-collect the children; shared host Ingresses lose this owner
-		return ctrl.Result{}, r.releaseHosts(ctx, req.Namespace, req.Name, nil)
+		// ownerReferences garbage-collect the children; shared host Ingresses and routes lose this owner
+		return ctrl.Result{}, r.release(ctx, req.Namespace, req.Name)
 	}
 	kids := children{r.Client, r.Recorder}
 
@@ -245,11 +252,19 @@ func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.
 		return nil, err
 	}
 
+	// the Gateway entry point first, so a Zone dropping its Ingress keeps serving
+	routed, routeZones, refused := routeHosts(site, zones, r.Config)
+	obs.routed, obs.routeRefused = len(routed) > 0 || refused != "", refused
+	if err := r.hostRoutes(ctx, site, routed, routeZones, obs); err != nil {
+		return nil, err
+	}
 	exp := site.Spec.Exposure
-	perSite := exp.Vanity() && exp.TLS == authv1.TLSPerSite
 	hosts, hostZones := ingressHosts(site, zones)
 	obs.ownIngress = len(hosts) > 0
-	if exp.Vanity() {
+	// a vanity Site whose hosts are all under ingress-none Zones gets no Ingress
+	vanity := exp.Vanity() && obs.ownIngress
+	perSite := vanity && exp.TLS == authv1.TLSPerSite
+	if vanity {
 		if err := r.vanityIngress(ctx, kids, site, hosts, obs); err != nil {
 			return nil, err
 		}
@@ -263,7 +278,7 @@ func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.
 		}
 	}
 	// after the host Ingresses exist, so a Site moving off its own Ingress keeps serving
-	if err := r.pruneExposure(ctx, kids, site, exp.Vanity(), perSite); err != nil {
+	if err := r.pruneExposure(ctx, kids, site, vanity, perSite); err != nil {
 		return nil, err
 	}
 	if perSite {
@@ -278,6 +293,14 @@ func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.
 	return obs, nil
 }
 
+// release drops a gone Site from the owners of its shared host Ingresses and routes.
+func (r *SiteReconciler) release(ctx context.Context, ns, name string) error {
+	if err := r.releaseHosts(ctx, ns, name, nil); err != nil || !r.Config.EnableGatewayAPI {
+		return err
+	}
+	return r.releaseRoutes(ctx, ns, name, nil)
+}
+
 // vanityIngress writes the Site's own site-<name> Ingress (every host), unless
 // another Ingress serves one of them exactly (an existing one is kept).
 func (r *SiteReconciler) vanityIngress(ctx context.Context, kids children, site *authv1.Site, hosts []string, obs *observed) error {
@@ -286,7 +309,7 @@ func (r *SiteReconciler) vanityIngress(ctx context.Context, kids children, site 
 	if err != nil {
 		return err
 	}
-	obs.hostTaken, obs.shadowed = taken, shadowed
+	obs.hostTaken, obs.shadowed = taken, appendNew(obs.shadowed, shadowed...)
 	existing := &networkingv1.Ingress{}
 	err = r.Get(ctx, client.ObjectKeyFromObject(want), existing)
 	if client.IgnoreNotFound(err) != nil {
@@ -442,6 +465,20 @@ func (r *SiteReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		cert := &unstructured.Unstructured{}
 		cert.SetGroupVersionKind(render.CertificateGVK)
 		b = b.Owns(cert)
+	}
+	if r.Config.EnableGatewayAPI {
+		// host routes are owned by Sites (not controlled) and foreign routes and
+		// listeners take hosts: all are mapped by hostname; a Gateway change
+		// (listeners) re-checks every Site
+		rt := &unstructured.Unstructured{}
+		rt.SetGroupVersionKind(render.HTTPRouteGVK)
+		ls := &unstructured.Unstructured{}
+		ls.SetGroupVersionKind(render.ListenerSetGVK)
+		gw := &unstructured.Unstructured{}
+		gw.SetGroupVersionKind(render.GatewayGVK)
+		b = b.Watches(rt, handler.EnqueueRequestsFromMapFunc(r.sitesForRoute)).
+			Watches(ls, handler.EnqueueRequestsFromMapFunc(r.sitesForListenerSet)).
+			Watches(gw, handler.EnqueueRequestsFromMapFunc(r.sitesForZone))
 	}
 	return b.Complete(r)
 }

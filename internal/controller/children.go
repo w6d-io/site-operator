@@ -11,6 +11,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -54,14 +55,20 @@ func (c children) ingress(ctx context.Context, owner client.Object, want *networ
 }
 
 func (c children) certificate(ctx context.Context, owner client.Object, want *unstructured.Unstructured) (*unstructured.Unstructured, error) {
+	return c.object(ctx, owner, want)
+}
+
+// object writes an owned unstructured child (Certificate, ListenerSet): created
+// when missing, its spec, labels and annotations put back when the spec hash differs.
+func (c children) object(ctx context.Context, owner client.Object, want *unstructured.Unstructured) (*unstructured.Unstructured, error) {
 	got := &unstructured.Unstructured{}
-	got.SetGroupVersionKind(render.CertificateGVK)
+	got.SetGroupVersionKind(want.GroupVersionKind())
 	err := c.Get(ctx, client.ObjectKeyFromObject(want), got)
 	if apierrors.IsNotFound(err) {
 		if err := c.Create(ctx, want); err != nil {
 			return nil, err
 		}
-		c.Recorder.Eventf(owner, "Normal", "CertificateCreated", "created Certificate %s", want.GetName())
+		c.Recorder.Eventf(owner, "Normal", want.GetKind()+"Created", "created %s %s", want.GetKind(), want.GetName())
 		return want, nil
 	}
 	if err != nil {
@@ -104,9 +111,13 @@ func (c children) deleteIngress(ctx context.Context, owner client.Object, key cl
 }
 
 func (c children) deleteCertificate(ctx context.Context, owner client.Object, key client.ObjectKey) error {
-	cert := &unstructured.Unstructured{}
-	cert.SetGroupVersionKind(render.CertificateGVK)
-	return c.deleteOwned(ctx, owner, cert, key)
+	return c.deleteKind(ctx, owner, render.CertificateGVK, key)
+}
+
+func (c children) deleteKind(ctx context.Context, owner client.Object, gvk schema.GroupVersionKind, key client.ObjectKey) error {
+	obj := &unstructured.Unstructured{}
+	obj.SetGroupVersionKind(gvk)
+	return c.deleteOwned(ctx, owner, obj, key)
 }
 
 func maps(a, b map[string]string) bool {
@@ -124,9 +135,17 @@ func maps(a, b map[string]string) bool {
 // certReady reads a cert-manager Certificate's Ready condition.
 func certReady(cert *unstructured.Unstructured) (ok bool, reason, msg string) {
 	conds, _, _ := unstructured.NestedSlice(cert.Object, "status", "conditions")
+	if ok, reason, msg, found := findCondition(conds, "Ready"); found {
+		return ok, reason, msg
+	}
+	return false, "Pending", "cert-manager has not reported yet"
+}
+
+// findCondition reads condition typ from an unstructured conditions list.
+func findCondition(conds []any, typ string) (ok bool, reason, msg string, found bool) {
 	for _, c := range conds {
 		m, _ := c.(map[string]any)
-		if m["type"] != "Ready" {
+		if m["type"] != typ {
 			continue
 		}
 		reason, _ = m["reason"].(string)
@@ -134,9 +153,9 @@ func certReady(cert *unstructured.Unstructured) (ok bool, reason, msg string) {
 		if reason == "" {
 			reason = "Pending"
 		}
-		return m["status"] == "True", reason, msg
+		return m["status"] == "True", reason, msg, true
 	}
-	return false, "Pending", "cert-manager has not reported yet"
+	return false, "", "", false
 }
 
 // lbAddress is the first load-balancer address of an admitted Ingress ("" if none).

@@ -17,13 +17,14 @@ import (
 )
 
 // ingressHosts are the hosts a Site's own Ingress serves: every host for a
-// vanity Site, else the hosts under per-site Zones (in Site order).
+// vanity Site, else the hosts under per-site Zones (in Site order). A Zone with
+// ingress none gives its hosts no Ingress (the gateway serves them).
 func ingressHosts(site *authv1.Site, zones []authv1.Zone) ([]string, map[string]*authv1.Zone) {
 	byHost := map[string]*authv1.Zone{}
 	var hosts []string
 	for _, h := range site.Spec.Hosts {
 		z := validate.HostZone(h, zones)
-		if site.Spec.Exposure.Vanity() || (z != nil && z.Spec.PerSite()) {
+		if (site.Spec.Exposure.Vanity() && (z == nil || !z.Spec.NoIngress())) || (z != nil && z.Spec.PerSite()) {
 			hosts = append(hosts, h)
 			byHost[h] = z
 		}

@@ -12,7 +12,13 @@ const (
 	ConditionRulesLoaded      = "RulesLoaded"
 	ConditionIngressReady     = "IngressReady"
 	ConditionCertificateReady = "CertificateReady"
-	ConditionReady            = "Ready"
+	// ConditionRouteReady: every host under a Gateway zone has its HTTPRoute
+	// accepted by that Gateway (True NoGateway when no host is).
+	ConditionRouteReady = "RouteReady"
+	// ConditionGatewayReady (Zones): the Zone's Gateway is programmed and a
+	// listener covers the Zone (True NoGateway when the Zone has none).
+	ConditionGatewayReady = "GatewayReady"
+	ConditionReady        = "Ready"
 	// ConditionHostShadowsWildcard (a warning, not part of Ready): the Site's own
 	// exact-host Ingress overrides a wildcard Ingress elsewhere for its hosts.
 	ConditionHostShadowsWildcard = "HostShadowsWildcard"

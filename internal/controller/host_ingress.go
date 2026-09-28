@@ -38,7 +38,7 @@ func (r *SiteReconciler) hostIngresses(ctx context.Context, site *authv1.Site, h
 		if err != nil {
 			return err
 		}
-		obs.shadowed = append(obs.shadowed, shadowed...)
+		obs.shadowed = appendNew(obs.shadowed, shadowed...)
 		if taken != "" && obs.hostTaken == "" {
 			obs.hostTaken = taken
 		}

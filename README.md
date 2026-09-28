@@ -60,6 +60,40 @@ uses its own `site-<name>-tls` Secret or a Zone's (the policy cannot read the Si
 host-to-Site match is the operator's); a `host-*` Ingress serves exactly the one host of its
 `auth.w6d.io/host` annotation, is owned only by Sites (no controller) and uses a Zone Secret.
 
+## Zones on a Gateway API Gateway (Envoy + WAF)
+
+`Zone.spec.gateway {namespace, name, sectionName?}` attaches the Zone's hosts to a Gateway
+API Gateway (here `envoy-gateway-system/eg`: Coraza WAF + CrowdSec ext_authz + IP denylist,
+all Gateway-level policies). It needs `--enable-gateway-api` and the Gateway in
+`--gateways` (else `Validated=False GatewayAPIDisabled` / `GatewayNotAllowed`). Each host
+gets one HTTPRoute `host-<hash8 of host>` (same name as its host Ingress, another kind),
+shared by every Site on the host like the host Ingress: exactly that hostname, `PathPrefix /`
+→ oathkeeper proxy by port number (`--gateway-service-port-number`), `timeouts.request`
+from `--route-request-timeout` (300s, like nginx's proxy-read-timeout), no filters. Rules do
+not change with the exposure.
+
+`ingress` gains `none`, and the gateway is additive, so a Zone migrates with three
+reversible writes and no gap: add `gateway` (routes appear next to the Ingresses; test with
+`curl --resolve host:443:<gateway ip>`), move DNS, set `ingress: none` (Ingresses released;
+routes are written before Ingresses are released in every reconcile). CEL refuses
+`ingress: none` without a gateway. TLS: `default` uses the Gateway listener whose hostname
+is exactly `*.<domain>` (else `GatewayReady=False ListenerDoesNotCover`); `issuer`/`secret`
+render ListenerSet `zone-<name>` (`*.<domain>`, the Zone Secret, routes from the gateway
+namespace only) and routes attach to it (the gateway namespace needs the Gateway's
+`allowedListeners` label).
+
+Host collisions add the Gateway side: a foreign HTTPRoute naming the host, or a listener
+with that exact hostname on the Zone's Gateway (its own or a ListenerSet's: it wins the
+match), takes the host (`RouteReady=False HostTaken`); a foreign wildcard route only
+shadows (`HostShadowsWildcard`). A foreign Ingress naming the host takes it too (a DNS move
+would hijack it). Admission: `site-operator-routes` (every HTTPRoute of the gateway
+namespace → oathkeeper proxy, parents in `allowedGateways` or a same-namespace ListenerSet,
+no RequestMirror/ExtensionRef; operator routes/ListenerSets match their templates),
+`site-operator-hosts` (host rules for routes and ListenerSets), `site-operator-route-policies`
+(no EnvoyExtensionPolicy in the gateway namespace, SecurityPolicies set `mergeType`, never
+target operator objects nor use `targetSelectors`: EG replaces a Gateway-level policy with a
+route-level one, which would drop the WAF or CrowdSec).
+
 ## Gateway (global handlers)
 
 `Gateway` (namespaced singleton `default`, `config/samples/gateway.yaml`) holds the global
@@ -180,7 +214,13 @@ Gateway conditions: `Validated`, `Applied`, `Rolled`, `Ready` (see Gateway above
 
 Site conditions: `Validated`, `RulesSynced` (maester acknowledged every Rule),
 `RulesLoaded`, `IngressReady` / `CertificateReady` (the Zone's, or the vanity
-Ingress/Certificate), `Ready` (all of them).
+Ingress/Certificate; `NoIngress` under `ingress: none`), `RouteReady` (every host route
+Accepted + ResolvedRefs by its parent; `NoGateway` when no host is on a Gateway), `Ready`
+(all of them).
+
+Zone conditions: `Validated`, `IngressReady`, `GatewayReady` (Gateway programmed, listener
+or ListenerSet covering the Zone, with the Gateway address; `NoGateway` without one),
+`CertificateReady`, `Ready`.
 
 `RulesLoaded`: the operator lists the Ready pods matching `--gateway-pod-selector` in the
 gateway namespace (pods get/list, uncached, no watch) and reads each pod's

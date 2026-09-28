@@ -9,6 +9,8 @@ import (
 	"time"
 
 	networkingv1 "k8s.io/api/networking/v1"
+	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -19,6 +21,7 @@ import (
 	"github.com/w6d-io/site-operator/internal/config"
 	"github.com/w6d-io/site-operator/internal/controller"
 	"github.com/w6d-io/site-operator/internal/loaded"
+	"github.com/w6d-io/site-operator/internal/render"
 	"github.com/w6d-io/site-operator/internal/scheme"
 	"github.com/w6d-io/site-operator/internal/validate"
 )
@@ -42,6 +45,18 @@ func main() {
 		os.Exit(1)
 	}
 
+	// the operator reads and writes the gateway namespace (namespaced Role); only
+	// Ingresses (and, with the Gateway API, HTTPRoutes, ListenerSets and Gateways)
+	// are watched cluster-wide (read-only) for the HostTaken check
+	all := cache.ByObject{Namespaces: map[string]cache.Config{cache.AllNamespaces: {}}}
+	byObject := map[client.Object]cache.ByObject{&networkingv1.Ingress{}: all}
+	if cfg.EnableGatewayAPI {
+		for _, gvk := range []schema.GroupVersionKind{render.HTTPRouteGVK, render.ListenerSetGVK, render.GatewayGVK} {
+			u := &unstructured.Unstructured{}
+			u.SetGroupVersionKind(gvk)
+			byObject[u] = all
+		}
+	}
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme:                  scheme.New(),
 		Metrics:                 metricsserver.Options{BindAddress: metricsAddr},
@@ -49,13 +64,9 @@ func main() {
 		LeaderElection:          leaderElect,
 		LeaderElectionID:        "site-operator.auth.w6d.io",
 		LeaderElectionNamespace: cfg.GatewayNamespace,
-		// the operator reads and writes the gateway namespace (namespaced Role); only
-		// Ingresses are watched cluster-wide (read-only) for the HostTaken check
 		Cache: cache.Options{
 			DefaultNamespaces: map[string]cache.Config{cfg.GatewayNamespace: {}},
-			ByObject: map[client.Object]cache.ByObject{
-				&networkingv1.Ingress{}: {Namespaces: map[string]cache.Config{cache.AllNamespaces: {}}},
-			},
+			ByObject:          byObject,
 		},
 	})
 	if err != nil {
@@ -102,7 +113,7 @@ func main() {
 	}
 	_ = mgr.AddHealthzCheck("healthz", healthz.Ping)
 	_ = mgr.AddReadyzCheck("readyz", healthz.Ping)
-	log.Info("starting", "namespace", cfg.GatewayNamespace, "gatekit", cfg.GatekitURL)
+	log.Info("starting", "namespace", cfg.GatewayNamespace, "gatekit", cfg.GatekitURL, "gatewayAPI", cfg.EnableGatewayAPI, "gateways", cfg.Gateways)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "manager exited")
 		os.Exit(1)

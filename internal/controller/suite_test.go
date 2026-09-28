@@ -99,6 +99,8 @@ func TestMain(m *testing.M) {
 	cfg = config.Default()
 	cfg.GatewayRolloutTimeout = 2 * time.Second
 	cfg.IngressAnnotations = map[string]string{"nginx.ingress.kubernetes.io/proxy-read-timeout": "300"}
+	cfg.EnableGatewayAPI = true
+	cfg.Gateways = []string{"envoy-gateway-system/eg"}
 
 	mgr, err := ctrl.NewManager(rc, ctrl.Options{Scheme: testenv.Scheme(), Metrics: metricsserver.Options{BindAddress: "0"}})
 	if err != nil {
@@ -146,13 +148,16 @@ func TestMain(m *testing.M) {
 		panic(err)
 	}
 	if err := testenv.ApplyFiles(ctx, k8s, filepath.Join(testenv.Root(), "config", "admission"),
-		"params.yaml", "ingress_policy.yaml", "rule_policy.yaml"); err != nil {
+		"params.yaml", "ingress_policy.yaml", "rule_policy.yaml", "route_policy.yaml"); err != nil {
 		panic(err)
 	}
 	if err := setupDevZone(ctx); err != nil {
 		panic(err)
 	}
 	if err := setupGatewayPlatform(ctx); err != nil {
+		panic(err)
+	}
+	if err := setupEnvoyGateway(ctx); err != nil {
 		panic(err)
 	}
 	code := m.Run()

@@ -6,3 +6,14 @@ spec:
   domain: dev.example.com
   ingressClass: nginx
   tls: {mode: default}   # dev nginx default cert is *.dev.example.com
+---
+# The same zone on Envoy Gateway (WAF + CrowdSec): add gateway, move DNS, then ingress: none.
+apiVersion: auth.w6d.io/v1alpha1
+kind: Zone
+metadata:
+  name: dev-envoy
+spec:
+  domain: envoy.dev.example.com
+  ingress: none
+  gateway: {namespace: envoy-gateway-system, name: eg}
+  tls: {mode: issuer}     # nested domain: its own ListenerSet + wildcard Certificate

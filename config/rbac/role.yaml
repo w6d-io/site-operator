@@ -1,7 +1,8 @@
 # The operator works inside the gateway namespace. It reads no Secrets, writes only
 # its own zones ConfigMap (by name), and cannot change a Site's spec (status only).
-# The only cluster-wide grants are reading Zones (cluster-scoped, admin-written)
-# and reading Ingresses (host collision check).
+# The only cluster-wide grants are reading Zones (cluster-scoped, admin-written),
+# and reading Ingresses and Gateway API Gateways, HTTPRoutes and ListenerSets
+# (host collision check, Zone gateway status).
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
@@ -28,6 +29,11 @@ rules:
   verbs: [get, list, watch, create, update, patch, delete]
 - apiGroups: [cert-manager.io]
   resources: [certificates]
+  verbs: [get, list, watch, create, update, patch, delete]
+# Zones with a gateway: one HTTPRoute per host, a ListenerSet per Zone with its
+# own certificate (site-operator-routes pins both to their templates)
+- apiGroups: [gateway.networking.k8s.io]
+  resources: [httproutes, listenersets]
   verbs: [get, list, watch, create, update, patch, delete]
 - apiGroups: [""]
   resources: [configmaps]
@@ -85,6 +91,11 @@ rules:
 # in the cluster serves (read-only; Ingress writes stay in the gateway namespace)
 - apiGroups: [networking.k8s.io]
   resources: [ingresses]
+  verbs: [get, list, watch]
+# Zones with a gateway: the Gateway's listeners and status, and every route and
+# ListenerSet that may already serve a host (read-only)
+- apiGroups: [gateway.networking.k8s.io]
+  resources: [gateways, httproutes, listenersets]
   verbs: [get, list, watch]
 - apiGroups: ["", events.k8s.io]
   resources: [events]

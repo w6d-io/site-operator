@@ -11,6 +11,10 @@ data:
   reservedHosts: auth.dev.example.com,kuma.dev.example.com,jinbe.dev.example.com,api.dev.example.com,grafana.dev.example.com,vault.dev.example.com,superadmin.dev.example.com
   gatewayService: auth-oathkeeper-proxy
   gatewayServicePort: http
+  # Gateway API Gateways (namespace/name) HTTPRoutes and ListenerSets of the
+  # gateway namespace may attach to: same list as --gateways, only Gateways whose
+  # Gateway-level policies run the WAF and CrowdSec on every route
+  allowedGateways: envoy-gateway-system/eg
   # keys the operator stamps (from --ingress-annotations) plus every key the chart's
   # Ingresses use on dev-aws-1/auth, auth-dev and prod-aws-1/auth (snapshot:
   # test/policy/testdata/chart-ingresses.yaml, refresh with hack/render-chart-ingresses.sh);

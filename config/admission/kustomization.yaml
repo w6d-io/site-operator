@@ -5,3 +5,4 @@ resources:
 - ingress_policy.yaml
 - rule_policy.yaml
 - gateway_policy.yaml
+- route_policy.yaml

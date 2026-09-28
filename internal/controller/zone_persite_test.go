@@ -154,9 +154,10 @@ func TestPerSiteZone(t *testing.T) {
 	setZoneMode(t, "shared", authv1.ZoneIngressPerSite)
 	gone(t, "zone-shared")
 	ingressCond(t, "alpha", metav1.ConditionFalse, "WaitingForAddress", "")
-	if _, err := ingressOf(hostIng("beta")); err != nil {
-		t.Fatal(err)
-	}
+	eventually(t, "beta's host Ingress is back", func() error {
+		_, err := ingressOf(hostIng("beta"))
+		return err
+	})
 }
 
 // hostIng is the host Ingress name of <name>.shared.example.com.

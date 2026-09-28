@@ -30,7 +30,8 @@ const (
 	ZonesSecretsKey = "secrets"
 )
 
-// ZoneReconciler renders one wildcard Ingress (+ Certificate) per Zone and
+// ZoneReconciler renders one wildcard Ingress (+ Certificate) per Zone, the
+// Zone's ListenerSet when it brings its own certificate to a Gateway, and
 // mirrors the Zone domains into a ConfigMap for the admission policy.
 type ZoneReconciler struct {
 	client.Client
@@ -65,31 +66,12 @@ func (r *ZoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	}
 	setZoneCondition(zone, authv1.ConditionValidated, metav1.ConditionTrue, "Valid", "zone settings are allowed")
 
-	if zone.Spec.PerSite() {
-		// no wildcard: each Site gets its own exact-host Ingress (after a cluster-wide host check)
-		if err := kids.deleteIngress(ctx, zone, key); err != nil {
-			return ctrl.Result{}, err
-		}
-		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionTrue, "PerSite",
-			"no wildcard Ingress: each Site gets its own exact-host Ingress")
-		if err := r.certificate(ctx, kids, zone, key); err != nil {
-			return ctrl.Result{}, err
-		}
-		setZoneReady(zone)
-		return ctrl.Result{}, errors.Join(r.writeStatus(ctx, zone), mirrorErr)
-	}
-	ing, err := kids.ingress(ctx, zone, render.ZoneIngress(zone, r.Config))
-	switch {
-	case errors.Is(err, errConflict):
-		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionFalse, "NameConflict", "Ingress "+key.Name+" "+errConflict.Error())
-	case err != nil:
+	if err := r.ingress(ctx, kids, zone, key); err != nil {
 		return ctrl.Result{}, err
-	case lbAddress(ing) == "":
-		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionFalse, "WaitingForAddress", "the ingress controller has not admitted the wildcard Ingress yet")
-	default:
-		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionTrue, "Admitted", "load balancer "+lbAddress(ing))
 	}
-
+	if err := r.gateway(ctx, kids, zone); err != nil {
+		return ctrl.Result{}, err
+	}
 	if err := r.certificate(ctx, kids, zone, key); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -97,9 +79,43 @@ func (r *ZoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	return ctrl.Result{}, errors.Join(r.writeStatus(ctx, zone), mirrorErr)
 }
 
+// ingress writes (or removes) the Zone's wildcard Ingress and reports IngressReady.
+func (r *ZoneReconciler) ingress(ctx context.Context, kids children, zone *authv1.Zone, key client.ObjectKey) error {
+	if zone.Spec.PerSite() || zone.Spec.NoIngress() {
+		// no wildcard: each Site gets its own exact-host Ingress (after a cluster-wide
+		// host check), or none at all when the gateway alone serves the zone
+		if err := kids.deleteIngress(ctx, zone, key); err != nil {
+			return err
+		}
+		if zone.Spec.NoIngress() {
+			setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionTrue, "NoIngress",
+				"no Ingress: the gateway "+zone.Spec.Gateway.Key()+" alone serves the zone")
+			return nil
+		}
+		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionTrue, "PerSite",
+			"no wildcard Ingress: each Site gets its own exact-host Ingress")
+		return nil
+	}
+	ing, err := kids.ingress(ctx, zone, render.ZoneIngress(zone, r.Config))
+	switch {
+	case errors.Is(err, errConflict):
+		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionFalse, "NameConflict", "Ingress "+key.Name+" "+errConflict.Error())
+	case err != nil:
+		return err
+	case lbAddress(ing) == "":
+		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionFalse, "WaitingForAddress", "the ingress controller has not admitted the wildcard Ingress yet")
+	default:
+		setZoneCondition(zone, authv1.ConditionIngressReady, metav1.ConditionTrue, "Admitted", "load balancer "+lbAddress(ing))
+	}
+	return nil
+}
+
 // check refuses Zone settings outside the operator config, and a domain that an
 // older Zone already claims (oldest wins).
 func (r *ZoneReconciler) check(zone *authv1.Zone, all []authv1.Zone) (string, string) {
+	if reason, msg := r.checkGateway(zone); reason != "" {
+		return reason, msg
+	}
 	if cls := render.ZoneIngressClass(zone, r.Config); !slices.Contains(r.Config.IngressClasses, cls) {
 		return "IngressClassNotAllowed", "ingress class " + cls + " is not allowed"
 	}
@@ -127,6 +143,12 @@ func (r *ZoneReconciler) certificate(ctx context.Context, kids children, zone *a
 			}
 		}
 		msg := "the ingress controller default certificate serves the zone"
+		switch {
+		case zone.Spec.Routed() && zone.Spec.NoIngress():
+			msg = "the gateway listener certificate serves the zone"
+		case zone.Spec.Routed():
+			msg = "the ingress controller default certificate and the gateway listener certificate serve the zone"
+		}
 		if zone.Spec.TLS.Mode == authv1.ZoneTLSSecret {
 			msg = "served with Secret " + zone.Spec.TLS.SecretName
 		}
@@ -194,7 +216,7 @@ func setZoneCondition(z *authv1.Zone, typ string, status metav1.ConditionStatus,
 }
 
 func setZoneReady(z *authv1.Zone) {
-	for _, t := range []string{authv1.ConditionIngressReady, authv1.ConditionCertificateReady} {
+	for _, t := range []string{authv1.ConditionIngressReady, authv1.ConditionGatewayReady, authv1.ConditionCertificateReady} {
 		if c := meta.FindStatusCondition(z.Status.Conditions, t); c == nil || c.Status != metav1.ConditionTrue {
 			reason, msg := t+"Pending", t+" not evaluated"
 			if c != nil {
@@ -205,8 +227,14 @@ func setZoneReady(z *authv1.Zone) {
 		}
 	}
 	msg := "wildcard Ingress admitted and certificate in place"
-	if z.Spec.PerSite() {
+	switch {
+	case z.Spec.NoIngress():
+		msg = "gateway " + z.Spec.Gateway.Key() + " only; certificate in place"
+	case z.Spec.PerSite():
 		msg = "per-site Ingresses; certificate in place"
+	}
+	if z.Spec.Routed() && !z.Spec.NoIngress() {
+		msg += "; gateway " + z.Spec.Gateway.Key() + " too (migration: move DNS, then set ingress none)"
 	}
 	setZoneCondition(z, authv1.ConditionReady, metav1.ConditionTrue, "Ready", msg)
 }
@@ -216,7 +244,7 @@ func (r *ZoneReconciler) writeStatus(ctx context.Context, z *authv1.Zone) error 
 	return r.Status().Update(ctx, z)
 }
 
-// zoneForChild maps a zone-<name> Ingress/Certificate back to its Zone.
+// zoneForChild maps a zone-<name> Ingress/Certificate/ListenerSet back to its Zone.
 func zoneForChild(_ context.Context, o client.Object) []reconcile.Request {
 	if z := o.GetLabels()[render.ZoneLabel]; z != "" {
 		return []reconcile.Request{{NamespacedName: client.ObjectKey{Name: z}}}
@@ -235,6 +263,14 @@ func (r *ZoneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 		cert := &unstructured.Unstructured{}
 		cert.SetGroupVersionKind(render.CertificateGVK)
 		b = b.Watches(cert, handler.EnqueueRequestsFromMapFunc(zoneForChild))
+	}
+	if r.Config.EnableGatewayAPI {
+		ls := &unstructured.Unstructured{}
+		ls.SetGroupVersionKind(render.ListenerSetGVK)
+		gw := &unstructured.Unstructured{}
+		gw.SetGroupVersionKind(render.GatewayGVK)
+		b = b.Watches(ls, handler.EnqueueRequestsFromMapFunc(zoneForChild)).
+			Watches(gw, handler.EnqueueRequestsFromMapFunc(r.zonesForGateway))
 	}
 	return b.Complete(r)
 }

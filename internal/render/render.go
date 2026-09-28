@@ -253,13 +253,8 @@ func certificate(m func(hash string) metav1.ObjectMeta, hosts []string, secret, 
 		"dnsNames":   dns,
 		"issuerRef":  map[string]any{"name": issuer, "kind": "ClusterIssuer", "group": "cert-manager.io"},
 	}
-	om := m(Hash(spec))
 	u := &unstructured.Unstructured{Object: map[string]any{"spec": spec}}
 	u.SetGroupVersionKind(CertificateGVK)
-	u.SetName(om.Name)
-	u.SetNamespace(om.Namespace)
-	u.SetLabels(om.Labels)
-	u.SetAnnotations(om.Annotations)
-	u.SetOwnerReferences(om.OwnerReferences)
+	setMeta(u, m(Hash(spec)))
 	return u
 }
