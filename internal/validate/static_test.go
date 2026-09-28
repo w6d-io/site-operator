@@ -60,6 +60,18 @@ func TestStatic(t *testing.T) {
 			s.Spec.Gates[0].Match.URL = "https://shop.authdev.dev.example.com/<.*>"
 		}, ""},
 		{"reserved host", onAuthHost, ReasonHostReserved},
+		{"ambiguous error handlers", func(s *authv1.Site) {
+			s.Spec.Gates[0].Errors = []authv1.Handler{
+				{Handler: "redirect", Config: &runtime.RawExtension{Raw: []byte(`{"to":"https://x/","when":[{"error":["forbidden"],"request":{"header":{"accept":["text/html"]}}}]}`)}},
+				{Handler: "json"}, // inherits the gateway's when: also answers browsers' 403
+			}
+		}, ReasonErrorsAmbiguous},
+		{"disjoint error handlers", func(s *authv1.Site) {
+			s.Spec.Gates[0].Errors = []authv1.Handler{
+				{Handler: "redirect", Config: &runtime.RawExtension{Raw: []byte(`{"to":"https://x/","when":[{"error":["forbidden"],"request":{"header":{"accept":["text/html"]}}}]}`)}},
+				{Handler: "json", Config: &runtime.RawExtension{Raw: []byte(`{"when":[{"error":["unauthorized","not_found","internal_server_error"]},{"error":["forbidden"],"request":{"header":{"accept":["application/json"]}}}]}`)}},
+			}
+		}, ""},
 		{"reserved host system", func(s *authv1.Site) { onAuthHost(s); s.Spec.System = true }, ""},
 		{"pattern for another host", func(s *authv1.Site) {
 			s.Spec.Gates[0].Match.URL = "<https?>://auth.dev.example.com/<.*>"

@@ -10,6 +10,7 @@ import (
 	"slices"
 	"strings"
 
+	okv1 "github.com/w6d-io/site-operator/api/oathkeeper/v1alpha1"
 	authv1 "github.com/w6d-io/site-operator/api/v1alpha1"
 	"github.com/w6d-io/site-operator/internal/config"
 	"github.com/w6d-io/site-operator/internal/render"
@@ -20,6 +21,7 @@ const (
 	ReasonWrongNamespace       = "WrongNamespace"
 	ReasonHostNotInZone        = "HostNotInZone"
 	ReasonHandlerNotEnabled    = "HandlerNotEnabled"
+	ReasonErrorsAmbiguous      = "ErrorHandlersAmbiguous"
 	ReasonAppNotPinned         = "AppNotPinned"
 	ReasonHostReserved         = "HostReserved"
 	ReasonPatternHostMismatch  = "PatternHostMismatch"
@@ -111,6 +113,10 @@ func Static(site *authv1.Site, cfg *config.Config, zones []authv1.Zone) *Refusal
 		if g.Authorizer.Handler == "remote_json" && !appPinned(g.Authorizer, site.Name) {
 			return refuse(ReasonAppNotPinned, "gate %q: the remote_json payload must pin \"app\":%q", g.Name, site.Name)
 		}
+		if a := render.AmbiguousErrors(okHandlers(g.Errors)); len(a) > 0 {
+			return refuse(ReasonErrorsAmbiguous, "gate %q: Oathkeeper would answer 500 (two error handlers match): %s; give each handler its own when (a handler without one inherits the gateway's)",
+				g.Name, strings.Join(a, "; "))
+		}
 	}
 	return exposure(site, cfg, zones)
 }
@@ -139,6 +145,14 @@ func handlersEnabled(g authv1.Gate, cfg *config.Config) *Refusal {
 		}
 	}
 	return nil
+}
+
+func okHandlers(hs []authv1.Handler) []*okv1.Handler {
+	out := make([]*okv1.Handler, 0, len(hs))
+	for _, h := range hs {
+		out = append(out, &okv1.Handler{Handler: h.Handler, Config: h.Config})
+	}
+	return out
 }
 
 // appPinned reports whether the remote_json payload names the site as "app", so

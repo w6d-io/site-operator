@@ -116,7 +116,15 @@ two other sites does not lock every site out. Non-2xx (e.g. 503 over budget) or 
 
 `spec.paused: true` swaps the gate Rules for one deny Rule per host (`<https?>://host/<.*>`,
 all methods): 403, browsers redirected to `--paused-redirect-url?site=<name>` when set, JSON
-clients get the json error. The vanity Ingress stays. It needs no gatekit call, so a site can
+clients get the json error. Every error handler carries its own `when` and no (error, Accept)
+pair matches two of them (two matches is a 500 in Oathkeeper; a rule `when` replaces the
+gateway's, a handler without one inherits it): redirect on `forbidden` + `text/html`; json on
+`unauthorized`/`not_found`/`internal_server_error`, and on `forbidden` for
+`application/json`, `application/problem+json`, `application/octet-stream` (no Accept); an
+Accept of only `*/*` takes the gateway fallback. Without a paused page, json has `when: []`.
+Checked against Oathkeeper v25.4.0's own matcher. The same check (`render.AmbiguousErrors`)
+refuses a Site gate whose error handlers overlap (`Validated=False ErrorHandlersAmbiguous`).
+The vanity Ingress stays. It needs no gatekit call, so a site can
 be paused while gatekit is down. Resume swaps the gate Rules back (same order as below).
 
 ## Ingress annotations
