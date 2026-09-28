@@ -63,8 +63,10 @@ type observed struct {
 	// shadowed lists wildcard Ingresses elsewhere whose paths the Site's exact-host
 	// Ingress overrides for its hosts (a warning, not a refusal).
 	shadowed []string
-	// ownIngress: the Site has its own Ingress (vanity, or hosts under per-site Zones).
+	// ownIngress: the Site has its own Ingress (vanity) or per-host Ingresses (hosts under per-site Zones).
 	ownIngress bool
+	// hostIngresses are the shared per-host Ingresses serving the Site's hosts.
+	hostIngresses []*networkingv1.Ingress
 }
 
 func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -72,12 +74,14 @@ func (r *SiteReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.
 	if err := r.Get(ctx, req.NamespacedName, site); err != nil {
 		if apierrors.IsNotFound(err) {
 			r.clock.forget(req.NamespacedName)
+			return ctrl.Result{}, r.releaseHosts(ctx, req.Namespace, req.Name, nil)
 		}
-		return ctrl.Result{}, client.IgnoreNotFound(err)
+		return ctrl.Result{}, err
 	}
 	if !site.DeletionTimestamp.IsZero() {
 		r.clock.forget(req.NamespacedName)
-		return ctrl.Result{}, nil // ownerReferences garbage-collect the children
+		// ownerReferences garbage-collect the children; shared host Ingresses lose this owner
+		return ctrl.Result{}, r.releaseHosts(ctx, req.Namespace, req.Name, nil)
 	}
 	kids := children{r.Client, r.Recorder}
 
@@ -244,48 +248,23 @@ func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.
 	exp := site.Spec.Exposure
 	perSite := exp.Vanity() && exp.TLS == authv1.TLSPerSite
 	hosts, hostZones := ingressHosts(site, zones)
-	var want *networkingv1.Ingress
+	obs.ownIngress = len(hosts) > 0
 	if exp.Vanity() {
-		want = render.Ingress(site, r.Config)
-	} else {
-		want = render.ZoneSiteIngress(site, hosts, hostZones, r.Config)
-	}
-	obs.ownIngress = want != nil
-	if err := r.pruneExposure(ctx, kids, site, want != nil, perSite); err != nil {
+		if err := r.vanityIngress(ctx, kids, site, hosts, obs); err != nil {
+			return nil, err
+		}
+	} else if err := r.hostIngresses(ctx, site, hosts, hostZones, obs); err != nil {
 		return nil, err
 	}
-	if want != nil {
-		// never serve a host another Ingress in the cluster already serves: create
-		// nothing (an existing Ingress of ours is kept, not taken down)
-		taken, shadowed, err := r.hostCheck(ctx, site, hosts)
-		if err != nil {
-			return nil, err
+	if len(obs.shadowed) > 0 {
+		c := meta.FindStatusCondition(site.Status.Conditions, authv1.ConditionHostShadowsWildcard)
+		if c == nil || c.Status != metav1.ConditionTrue || c.Message != strings.Join(obs.shadowed, "; ") {
+			r.Recorder.Event(site, "Warning", "WildcardShadowed", strings.Join(obs.shadowed, "; "))
 		}
-		obs.hostTaken, obs.shadowed = taken, shadowed
-		if c := meta.FindStatusCondition(site.Status.Conditions, authv1.ConditionHostShadowsWildcard); len(shadowed) > 0 &&
-			(c == nil || c.Status != metav1.ConditionTrue || c.Message != strings.Join(shadowed, "; ")) {
-			r.Recorder.Event(site, "Warning", "WildcardShadowed", strings.Join(shadowed, "; "))
-		}
-		existing := &networkingv1.Ingress{}
-		err = r.Get(ctx, client.ObjectKeyFromObject(want), existing)
-		if client.IgnoreNotFound(err) != nil {
-			return nil, err
-		}
-		switch {
-		case taken != "" && err != nil: // not found: nothing created
-		case taken != "":
-			if metav1.IsControlledBy(existing, site) {
-				obs.ingress = existing
-			}
-		default:
-			ing, err := kids.ingress(ctx, site, want)
-			if errors.Is(err, errConflict) {
-				obs.conflict = "Ingress " + render.IngressName(site)
-			} else if err != nil {
-				return nil, err
-			}
-			obs.ingress = ing
-		}
+	}
+	// after the host Ingresses exist, so a Site moving off its own Ingress keeps serving
+	if err := r.pruneExposure(ctx, kids, site, exp.Vanity(), perSite); err != nil {
+		return nil, err
 	}
 	if perSite {
 		cert, err := kids.certificate(ctx, site, render.Certificate(site, r.Config))
@@ -297,6 +276,38 @@ func (r *SiteReconciler) apply(ctx context.Context, kids children, site *authv1.
 		obs.cert = cert
 	}
 	return obs, nil
+}
+
+// vanityIngress writes the Site's own site-<name> Ingress (every host), unless
+// another Ingress serves one of them exactly (an existing one is kept).
+func (r *SiteReconciler) vanityIngress(ctx context.Context, kids children, site *authv1.Site, hosts []string, obs *observed) error {
+	want := render.Ingress(site, r.Config)
+	taken, shadowed, err := r.hostCheck(ctx, site, hosts)
+	if err != nil {
+		return err
+	}
+	obs.hostTaken, obs.shadowed = taken, shadowed
+	existing := &networkingv1.Ingress{}
+	err = r.Get(ctx, client.ObjectKeyFromObject(want), existing)
+	if client.IgnoreNotFound(err) != nil {
+		return err
+	}
+	switch {
+	case taken != "" && err != nil: // not found: nothing created
+	case taken != "":
+		if metav1.IsControlledBy(existing, site) {
+			obs.ingress = existing
+		}
+	default:
+		ing, err := kids.ingress(ctx, site, want)
+		if errors.Is(err, errConflict) {
+			obs.conflict = "Ingress " + render.IngressName(site)
+		} else if err != nil {
+			return err
+		}
+		obs.ingress = ing
+	}
+	return nil
 }
 
 func (r *SiteReconciler) applyRule(ctx context.Context, site *authv1.Site, want *okv1.Rule) (*okv1.Rule, error) {

@@ -45,11 +45,11 @@ func servesByWildcard(rule, host string) bool {
 // serves reports whether an Ingress rule host serves host, exactly or by wildcard.
 func serves(rule, host string) bool { return servesExactly(rule, host) || servesByWildcard(rule, host) }
 
-// hostCheck looks at every Ingress in the cluster not controlled by site. An
+// hostCheck looks at every Ingress in the cluster not written by this operator. An
 // exact-host one takes the host ("<ns>/<name> serves <host>", blocking); a
 // wildcard one is only shadowed for that host by the Site's exact-host Ingress
 // (nginx: exact server block wins), reported as a warning. This operator's own
-// Zone wildcards are expected and skipped.
+// Ingresses (see ours) are skipped.
 func (r *SiteReconciler) hostCheck(ctx context.Context, site *authv1.Site, hosts []string) (taken string, shadowed []string, err error) {
 	if len(hosts) == 0 {
 		return "", nil, nil
@@ -63,7 +63,7 @@ func (r *SiteReconciler) hostCheck(ctx context.Context, site *authv1.Site, hosts
 	})
 	for i := range list.Items {
 		ing := &list.Items[i]
-		if metav1.IsControlledBy(ing, site) || r.zoneWildcard(ing) {
+		if metav1.IsControlledBy(ing, site) || r.ours(ing) {
 			continue
 		}
 		for _, rule := range ing.Spec.Rules {
@@ -90,9 +90,16 @@ func (r *SiteReconciler) hostCheck(ctx context.Context, site *authv1.Site, hosts
 	return taken, shadowed, nil
 }
 
-func (r *SiteReconciler) zoneWildcard(ing *networkingv1.Ingress) bool {
-	return ing.Namespace == r.Config.GatewayNamespace && ing.Labels[render.ManagedByLabel] == render.ManagedBy &&
-		ing.Labels[render.ZoneLabel] != "" && strings.HasPrefix(ing.Name, "zone-")
+// ours reports whether an Ingress is one this operator writes in the gateway
+// namespace (admission lets nobody else write those names with its label): a
+// Zone wildcard, a Site's vanity Ingress, a shared per-host Ingress. Sites on one
+// host share it on purpose (route ties are keyed by host), so none is a collision.
+func (r *SiteReconciler) ours(ing *networkingv1.Ingress) bool {
+	if ing.Namespace != r.Config.GatewayNamespace || ing.Labels[render.ManagedByLabel] != render.ManagedBy {
+		return false
+	}
+	return (ing.Labels[render.ZoneLabel] != "" && strings.HasPrefix(ing.Name, "zone-")) ||
+		strings.HasPrefix(ing.Name, "site-") || hostIngress(ing)
 }
 
 // sitesForIngress re-reconciles the Sites whose hosts an Ingress (anywhere)

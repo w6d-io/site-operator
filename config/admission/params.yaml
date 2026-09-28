@@ -17,7 +17,7 @@ data:
   # never auth-url, ssl-passthrough, permanent-redirect, *-snippet, rewrite-target
   # default-backend is allowed only with the value below (the chart's error page)
   allowedIngressAnnotations: >-
-    auth.w6d.io/spec-hash,cert-manager.io/cluster-issuer,kubectl.kubernetes.io/last-applied-configuration,
+    auth.w6d.io/spec-hash,auth.w6d.io/host,cert-manager.io/cluster-issuer,kubectl.kubernetes.io/last-applied-configuration,
     nginx.ingress.kubernetes.io/enable-cors,nginx.ingress.kubernetes.io/cors-allow-origin,
     nginx.ingress.kubernetes.io/cors-allow-credentials,nginx.ingress.kubernetes.io/cors-allow-methods,
     nginx.ingress.kubernetes.io/cors-allow-headers,nginx.ingress.kubernetes.io/cors-expose-headers,

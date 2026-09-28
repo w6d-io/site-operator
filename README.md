@@ -32,13 +32,18 @@ adds a per-site Ingress from the fixed template, with `tls: per-site` for its ow
 
 `ingress: per-site` (default `wildcard`) is for a domain other Ingresses in the cluster
 already use (e.g. the sandbox on `dev.example.com`): the Zone renders **no** wildcard
-Ingress (`IngressReady=True PerSite`); each Site under it gets its own exact-host Ingress
-`site-<name>` from the fixed template (backend oathkeeper-proxy), TLS from the Zone
+Ingress (`IngressReady=True PerSite`); each **host** under it gets one exact-host Ingress
+`host-<hash8 of host>` (annotation `auth.w6d.io/host`) from the fixed template (backend
+oathkeeper-proxy), shared by every Site on that host (route prefixes, e.g. wallets-api
+`/wallets/api` and wallets-treasury `/wallets/treasury`): each Site is a plain owner (none is
+the controller), the Ingress goes with the last one (the operator releases a deleted Site's
+reference itself, the GC does too), TLS from the Zone
 (`default`: no tls block, the controller's default/wildcard certificate; `secret` / `issuer`:
 the Zone's Secret, mirrored into `site-operator-zones` key `secrets` for admission).
 
-Before creating a Site's own Ingress (per-site or vanity), the operator checks **every**
-Ingress in the cluster (read-only cluster-wide watch): if one it does not own serves a host
+Before creating a host or vanity Ingress, the operator checks **every** Ingress in the
+cluster (read-only cluster-wide watch) except its own (Zone wildcards, `site-*`, `host-*` in
+the gateway namespace): if one serves a host
 **exactly**, nothing is created and `IngressReady=False HostTaken` names `<namespace>/<name>`;
 an Ingress of ours that already serves is kept, not taken down. A **wildcard** one label
 above (e.g. `loki/loki-alloy` `*.dev.example.com` `/collect` on dev-aws-1) is not a
@@ -48,11 +53,12 @@ created (`IngressReady` stays True) and the warning condition `HostShadowsWildca
 <host> to this Site (paths of that Ingress, e.g. /collect, are not served on this host)`. This operator's own
 Zone wildcards are ignored. When the other Ingress goes away the Site's Ingress is created (Ingress watch).
 Switching a Zone's mode is handled both ways: to `per-site` the wildcard is deleted and the
-Sites create their Ingresses; to `wildcard` the wildcard is created and the Sites delete
-theirs (expect a short gap while both controllers reconcile). Admission: a `site-*` Ingress
+host Ingresses are created; to `wildcard` the wildcard is created and the host Ingresses
+are released (expect a short gap while both controllers reconcile). Admission: a `site-*` Ingress
 serves exact hosts one label under a Zone, is controlled by the Site it is named after, and
 uses its own `site-<name>-tls` Secret or a Zone's (the policy cannot read the Site, so the
-host-to-Site match is the operator's).
+host-to-Site match is the operator's); a `host-*` Ingress serves exactly the one host of its
+`auth.w6d.io/host` annotation, is owned only by Sites (no controller) and uses a Zone Secret.
 
 ## Gateway (global handlers)
 

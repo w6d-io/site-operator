@@ -6,6 +6,7 @@ import (
 	"slices"
 	"strings"
 
+	networkingv1 "k8s.io/api/networking/v1"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -98,6 +99,10 @@ func setRulesSynced(site *authv1.Site, desired, got []*okv1.Rule) {
 }
 
 func setIngressReady(site *authv1.Site, obs *observed) {
+	ings := obs.hostIngresses
+	if site.Spec.Exposure.Vanity() && obs.ingress != nil {
+		ings = []*networkingv1.Ingress{obs.ingress}
+	}
 	switch {
 	case obs.hostTaken != "":
 		setCondition(site, authv1.ConditionIngressReady, metav1.ConditionFalse, "HostTaken",
@@ -105,12 +110,17 @@ func setIngressReady(site *authv1.Site, obs *observed) {
 	case !obs.ownIngress:
 		st, reason, msg := zoneCondition(site, obs.zones, authv1.ConditionIngressReady)
 		setCondition(site, authv1.ConditionIngressReady, st, reason, msg)
-	case obs.ingress == nil:
+	case obs.conflict != "" || len(ings) == 0:
 		setCondition(site, authv1.ConditionIngressReady, metav1.ConditionFalse, "NameConflict", obs.conflict+" "+errConflict.Error())
-	case lbAddress(obs.ingress) == "":
-		setCondition(site, authv1.ConditionIngressReady, metav1.ConditionFalse, "WaitingForAddress", "the ingress controller has not admitted the Ingress yet")
 	default:
-		setCondition(site, authv1.ConditionIngressReady, metav1.ConditionTrue, "Admitted", "load balancer "+lbAddress(obs.ingress))
+		for _, ing := range ings {
+			if lbAddress(ing) == "" {
+				setCondition(site, authv1.ConditionIngressReady, metav1.ConditionFalse, "WaitingForAddress",
+					"the ingress controller has not admitted Ingress "+ing.Name+" yet")
+				return
+			}
+		}
+		setCondition(site, authv1.ConditionIngressReady, metav1.ConditionTrue, "Admitted", "load balancer "+lbAddress(ings[0]))
 	}
 }
 
@@ -162,6 +172,9 @@ func (r *SiteReconciler) writeStatus(ctx context.Context, site *authv1.Site, obs
 		var ch []authv1.Child
 		for _, rl := range obs.rules {
 			ch = append(ch, authv1.Child{Kind: "Rule", Name: rl.Name, SpecHash: rl.Annotations[render.SpecHashAnnotation]})
+		}
+		for _, ing := range obs.hostIngresses {
+			ch = append(ch, authv1.Child{Kind: "Ingress", Name: ing.Name, SpecHash: ing.Annotations[render.SpecHashAnnotation]})
 		}
 		if obs.ingress != nil {
 			ch = append(ch, authv1.Child{Kind: "Ingress", Name: obs.ingress.Name, SpecHash: obs.ingress.Annotations[render.SpecHashAnnotation]})

@@ -61,28 +61,30 @@ func ZoneCertificate(z *authv1.Zone, cfg *config.Config) *unstructured.Unstructu
 		[]string{"*." + z.Spec.Domain}, ZoneSecret(z), ZoneIssuer(z, cfg))
 }
 
-// ZoneSiteIngress is a Site's exact-host Ingress for its hosts under per-site
-// Zones (hosts: host → its Zone, in Site order): the fixed template, backend the
-// gateway, TLS from each Zone's settings (none for mode default). nil when the
-// Site has no such host.
-func ZoneSiteIngress(site *authv1.Site, hosts []string, zones map[string]*authv1.Zone, cfg *config.Config) *networkingv1.Ingress {
-	if len(hosts) == 0 {
-		return nil
-	}
+// HostIngressLabel marks the shared per-host Ingresses of per-site Zones.
+const (
+	HostIngressLabel = "auth.w6d.io/host-ingress"
+	// HostAnnotation carries the host a per-host Ingress serves (labels are too short for hosts).
+	HostAnnotation = "auth.w6d.io/host"
+)
+
+// HostIngressName names the Ingress of one host under a per-site Zone.
+func HostIngressName(host string) string { return "host-" + Hash(host) }
+
+// HostIngress is the exact-host Ingress of one host under a per-site Zone,
+// shared by every Site on that host (each one an owner, none the controller,
+// so it goes away with the last one): the fixed template, backend the gateway,
+// TLS from the Zone (none for mode default). Owner references are set by the caller.
+func HostIngress(host string, zone *authv1.Zone, cfg *config.Config) *networkingv1.Ingress {
 	var tls []networkingv1.IngressTLS
-	bySecret := map[string]int{}
-	for _, h := range hosts {
-		s := ZoneSecret(zones[h])
-		if s == "" {
-			continue
-		}
-		if i, ok := bySecret[s]; ok {
-			tls[i].Hosts = append(tls[i].Hosts, h)
-			continue
-		}
-		bySecret[s] = len(tls)
-		tls = append(tls, networkingv1.IngressTLS{Hosts: []string{h}, SecretName: s})
+	if s := ZoneSecret(zone); s != "" {
+		tls = []networkingv1.IngressTLS{{Hosts: []string{host}, SecretName: s}}
 	}
-	spec := ingressSpec(ZoneIngressClass(zones[hosts[0]], cfg), hosts, tls, cfg)
-	return ingress(meta(site, IngressName(site), ingressHash(spec, cfg)), spec, cfg)
+	spec := ingressSpec(ZoneIngressClass(zone, cfg), []string{host}, tls, cfg)
+	m := metav1.ObjectMeta{
+		Name: HostIngressName(host), Namespace: cfg.GatewayNamespace,
+		Labels:      map[string]string{ManagedByLabel: ManagedBy, HostIngressLabel: "true", ZoneLabel: zone.Name},
+		Annotations: map[string]string{SpecHashAnnotation: ingressHash(spec, cfg), HostAnnotation: host},
+	}
+	return ingress(m, spec, cfg)
 }

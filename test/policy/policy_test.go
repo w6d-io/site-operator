@@ -16,6 +16,7 @@ import (
 	rbacv1 "k8s.io/api/rbac/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/yaml"
@@ -239,8 +240,8 @@ func TestIngressPolicy(t *testing.T) {
 		map[string]string{"nginx.ingress.kubernetes.io/ssl-passthrough": "true"}, nil), "allow-list")
 	denied(t, admin, ingress("authurl", "authurl.dev.example.com", proxy,
 		map[string]string{"nginx.ingress.kubernetes.io/auth-url": "http://x"}, nil), "allow-list")
-	denied(t, operator, ingress("rogue", "rogue.dev.example.com", proxy, nil, managed), "named site-<name> or zone-<name>")
-	denied(t, operator, ingress("site-unlabelled", "u.dev.example.com", proxy, nil, nil), "named site-<name> or zone-<name>")
+	denied(t, operator, ingress("rogue", "rogue.dev.example.com", proxy, nil, managed), "named site-<name>, zone-<name> or host-<hash>")
+	denied(t, operator, ingress("site-unlabelled", "u.dev.example.com", proxy, nil, nil), "named site-<name>, zone-<name> or host-<hash>")
 	denied(t, operator, ingress("zone-evil", "*.evil.com", proxy, nil, managed), "wildcard of a Zone domain")
 	denied(t, operator, ingress("zone-deep", "*.x.dev.example.com", proxy, nil, managed), "wildcard of a Zone domain")
 	denied(t, operator, ingress("site-far", "far.example.com", proxy, nil, managed), "one DNS label under a Zone domain")
@@ -254,7 +255,7 @@ func TestIngressPolicy(t *testing.T) {
 	if err := operator.Get(ctx, client.ObjectKey{Namespace: "auth", Name: "auth-oathkeeper-proxy"}, helm); err != nil {
 		t.Fatal(err)
 	}
-	if err := operator.Delete(ctx, helm); err == nil || !strings.Contains(err.Error(), "named site-<name>") {
+	if err := operator.Delete(ctx, helm); err == nil || !strings.Contains(err.Error(), "named site-<name>, zone-<name>") {
 		t.Fatalf("operator deleted the chart Ingress: %v", err)
 	}
 }
@@ -282,6 +283,28 @@ func TestSiteIngressPolicy(t *testing.T) {
 	denied(t, operator, siteIngress("thief", "thief.dev.example.com", "auth-kratos-tls"), "own TLS Secret or its Zone's")
 	allowed(t, operator, siteIngress("own", "own.dev.example.com", "site-own-tls"))
 	allowed(t, operator, siteIngress("zoned", "zoned.dev.example.com", "dev-wildcard"))
+
+	// shared per-host Ingresses (per-site Zone): one host, Site owners only, Zone TLS only
+	host := func(name, h string, owners ...string) *networkingv1.Ingress {
+		ing := ingress(name, h, "auth-oathkeeper-proxy", map[string]string{"auth.w6d.io/spec-hash": "abcd1234", "auth.w6d.io/host": h}, managed)
+		for _, o := range owners {
+			ing.OwnerReferences = append(ing.OwnerReferences, metav1.OwnerReference{APIVersion: "auth.w6d.io/v1alpha1", Kind: "Site", Name: o, UID: types.UID("u-" + o)})
+		}
+		return ing
+	}
+	allowed(t, operator, host("host-0123abcd", "wallets.dev.example.com", "wallets-api", "wallets-treasury"))
+	denied(t, operator, host("host-evil", "evil.dev.example.com", "a"), "serves exactly one host")
+	denied(t, operator, host("host-0123abce", "other.dev.example.com"), "serves exactly one host") // no owner
+	wrongHost := host("host-0123abcf", "x.dev.example.com", "a")
+	wrongHost.Annotations["auth.w6d.io/host"] = "y.dev.example.com"
+	denied(t, operator, wrongHost, "serves exactly one host")
+	ctl := host("host-0123abd0", "c.dev.example.com", "a")
+	yes := true
+	ctl.OwnerReferences[0].Controller = &yes
+	denied(t, operator, ctl, "serves exactly one host")
+	own := host("host-0123abd1", "d.dev.example.com", "a")
+	own.Spec.TLS = []networkingv1.IngressTLS{{Hosts: []string{"d.dev.example.com"}, SecretName: "auth-kratos-tls"}}
+	denied(t, operator, own, "serves exactly one host")
 }
 
 func TestRulePolicy(t *testing.T) {
