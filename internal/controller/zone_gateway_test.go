@@ -275,7 +275,9 @@ func TestGatewayZoneRefusals(t *testing.T) {
 	if err := k8s.Create(ctx, withHost(newSite("other-gw"), "a.other.example.com")); err != nil {
 		t.Fatal(err)
 	}
-	t.Cleanup(func() { _ = k8s.Delete(ctx, &authv1.Site{ObjectMeta: metav1.ObjectMeta{Name: "other-gw", Namespace: "auth"}}) })
+	t.Cleanup(func() {
+		_ = k8s.Delete(ctx, &authv1.Site{ObjectMeta: metav1.ObjectMeta{Name: "other-gw", Namespace: "auth"}})
+	})
 	s := cond(t, "other-gw", authv1.ConditionRouteReady, metav1.ConditionFalse, "GatewayNotUsable")
 	condMessage(t, s, authv1.ConditionRouteReady, "gateway envoy-gateway-system/internal is not allowed")
 	if _, err := routeOf(render.HostRouteName("a.other.example.com")); !apierrors.IsNotFound(err) {
