@@ -1,0 +1,23 @@
+name: CI
+
+on:
+  push:
+    branches: ['main', 'develop', 'feature/**', 'hotfix/**']
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      # The controller suites run against envtest (a real kube-apiserver + etcd), as `make test` does.
+      - run: go install sigs.k8s.io/controller-runtime/tools/setup-envtest@latest
+      - run: KUBEBUILDER_ASSETS="$(setup-envtest use -p path 1.35.0)" go test ./...
+      - run: go build ./...
