@@ -215,6 +215,45 @@ func rulesOf(site string) (int, error) {
 	return n, nil
 }
 
+func TestSiteMovedToAForeignZoneIsWithdrawn(t *testing.T) {
+	if err := k8s.Create(ctx, newSite("mover", "mover.owned.example.com")); err != nil {
+		t.Fatal(err)
+	}
+	validated(t, "mover", metav1.ConditionTrue, "Valid")
+	eventually(t, "site has Rules", func() error {
+		if n, err := rulesOf("mover"); err != nil || n == 0 {
+			return fmt.Errorf("rules %d %v", n, err)
+		}
+		return nil
+	})
+	s := &authv1.Site{}
+	if err := k8s.Get(ctx, client.ObjectKey{Namespace: "auth", Name: "mover"}, s); err != nil {
+		t.Fatal(err)
+	}
+	s.Spec.Hosts = []string{"mover.foreign.example.com"}
+	s.Spec.Gates[0].Match.URL = "<https?>://mover.foreign.example.com/<.*>"
+	if err := k8s.Update(ctx, s); err != nil {
+		t.Fatal(err)
+	}
+	validated(t, "mover", metav1.ConditionFalse, validate.ReasonZoneNotOwned)
+	eventually(t, "earlier children withdrawn", func() error {
+		if n, err := rulesOf("mover"); err != nil || n != 0 {
+			return fmt.Errorf("rules %d %v", n, err)
+		}
+		got := &authv1.Site{}
+		if err := k8s.Get(ctx, client.ObjectKey{Namespace: "auth", Name: "mover"}, got); err != nil {
+			return err
+		}
+		if len(got.Status.Children) != 0 {
+			return fmt.Errorf("children still listed: %+v", got.Status.Children)
+		}
+		if c := meta.FindStatusCondition(got.Status.Conditions, authv1.ConditionRulesSynced); c == nil || c.Status != metav1.ConditionFalse {
+			return fmt.Errorf("RulesSynced %+v", c)
+		}
+		return nil
+	})
+}
+
 func TestSiteUnderAForeignZoneIsRefused(t *testing.T) {
 	if err := k8s.Create(ctx, newSite("intruder", "shop.foreign.example.com")); err != nil {
 		t.Fatal(err)

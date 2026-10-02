@@ -174,8 +174,31 @@ func (r *SiteReconciler) validate(ctx context.Context, site *authv1.Site, zones 
 func (r *SiteReconciler) refuse(ctx context.Context, site *authv1.Site, ref *validate.Refusal) error {
 	r.Recorder.Event(site, "Warning", ref.Reason, ref.Message)
 	setCondition(site, authv1.ConditionValidated, metav1.ConditionFalse, ref.Reason, ref.Message)
+	var obs *observed
+	if ref.Reason == validate.ReasonZoneNotOwned {
+		if err := r.withdraw(ctx, site); err != nil {
+			return err
+		}
+		obs = &observed{}
+		for _, t := range readyInputs[1:] {
+			setCondition(site, t, metav1.ConditionFalse, ref.Reason, "withdrawn: the host's zone is not this operator's")
+		}
+	}
 	setReady(site)
-	return r.writeStatus(ctx, site, nil)
+	return r.writeStatus(ctx, site, obs)
+}
+
+// withdraw removes everything the Site wrote earlier. Other refusals keep the previous children
+// serving (a bad edit must not take a site down); a host under another release's Zone must not keep
+// serving from this one, whatever it was before the zone left --zones.
+func (r *SiteReconciler) withdraw(ctx context.Context, site *authv1.Site) error {
+	if err := r.pruneRules(ctx, site, nil); err != nil {
+		return err
+	}
+	if err := r.pruneExposure(ctx, children{r.Client, r.Recorder}, site, false, false); err != nil {
+		return err
+	}
+	return r.release(ctx, site.Namespace, site.Name)
 }
 
 // enabledConfig is the operator config with the handler sets of the Gateway:
