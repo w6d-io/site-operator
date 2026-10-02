@@ -14,8 +14,10 @@ import (
 	"k8s.io/apimachinery/pkg/apis/meta/v1/unstructured"
 	"k8s.io/client-go/tools/record"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
+	"sigs.k8s.io/controller-runtime/pkg/predicate"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	authv1 "github.com/w6d-io/site-operator/api/v1alpha1"
@@ -42,6 +44,10 @@ type ZoneReconciler struct {
 }
 
 func (r *ZoneReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
+	if !r.Config.OwnsZone(req.Name) {
+		// another release's Zone (--zones): no status, no children
+		return ctrl.Result{}, nil
+	}
 	var all authv1.ZoneList
 	if err := r.List(ctx, &all); err != nil {
 		return ctrl.Result{}, err
@@ -171,13 +177,14 @@ func (r *ZoneReconciler) certificate(ctx context.Context, kids children, zone *a
 	return nil
 }
 
-// mirror writes the sorted Zone domains into the pre-created ConfigMap. The
-// operator may only get/update that one ConfigMap (RBAC resourceNames).
+// mirror writes the sorted domains of the Zones this operator owns into the
+// pre-created ConfigMap. The operator may only get/update that one ConfigMap
+// (RBAC resourceNames).
 func (r *ZoneReconciler) mirror(ctx context.Context, zones []authv1.Zone) error {
 	var domains, secrets []string
 	for i := range zones {
 		z := &zones[i]
-		if !z.DeletionTimestamp.IsZero() {
+		if !z.DeletionTimestamp.IsZero() || !r.Config.OwnsZone(z.Name) {
 			continue
 		}
 		if !slices.Contains(domains, z.Spec.Domain) {
@@ -244,9 +251,11 @@ func (r *ZoneReconciler) writeStatus(ctx context.Context, z *authv1.Zone) error 
 	return r.Status().Update(ctx, z)
 }
 
-// zoneForChild maps a zone-<name> Ingress/Certificate/ListenerSet back to its Zone.
-func zoneForChild(_ context.Context, o client.Object) []reconcile.Request {
-	if z := o.GetLabels()[render.ZoneLabel]; z != "" {
+// zoneForChild maps a zone-<name> Ingress/Certificate/ListenerSet back to its
+// Zone, if this operator owns it (the Ingress and ListenerSet watches are
+// cluster-wide, so another release's children are seen too).
+func (r *ZoneReconciler) zoneForChild(_ context.Context, o client.Object) []reconcile.Request {
+	if z := o.GetLabels()[render.ZoneLabel]; z != "" && r.Config.OwnsZone(z) {
 		return []reconcile.Request{{NamespacedName: client.ObjectKey{Name: z}}}
 	}
 	return nil
@@ -256,20 +265,22 @@ func zoneForChild(_ context.Context, o client.Object) []reconcile.Request {
 // namespace with a cluster-scoped owner, so they are mapped by label.
 func (r *ZoneReconciler) SetupWithManager(mgr ctrl.Manager) error {
 	b := ctrl.NewControllerManagedBy(mgr).
-		For(&authv1.Zone{}).
-		Watches(&networkingv1.Ingress{}, handler.EnqueueRequestsFromMapFunc(zoneForChild)).
+		For(&authv1.Zone{}, builder.WithPredicates(predicate.NewPredicateFuncs(func(o client.Object) bool {
+			return r.Config.OwnsZone(o.GetName())
+		}))).
+		Watches(&networkingv1.Ingress{}, handler.EnqueueRequestsFromMapFunc(r.zoneForChild)).
 		Named("zone")
 	if r.Config.EnableCertificates {
 		cert := &unstructured.Unstructured{}
 		cert.SetGroupVersionKind(render.CertificateGVK)
-		b = b.Watches(cert, handler.EnqueueRequestsFromMapFunc(zoneForChild))
+		b = b.Watches(cert, handler.EnqueueRequestsFromMapFunc(r.zoneForChild))
 	}
 	if r.Config.EnableGatewayAPI {
 		ls := &unstructured.Unstructured{}
 		ls.SetGroupVersionKind(render.ListenerSetGVK)
 		gw := &unstructured.Unstructured{}
 		gw.SetGroupVersionKind(render.GatewayGVK)
-		b = b.Watches(ls, handler.EnqueueRequestsFromMapFunc(zoneForChild)).
+		b = b.Watches(ls, handler.EnqueueRequestsFromMapFunc(r.zoneForChild)).
 			Watches(gw, handler.EnqueueRequestsFromMapFunc(r.zonesForGateway))
 	}
 	return b.Complete(r)

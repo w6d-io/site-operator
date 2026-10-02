@@ -20,6 +20,7 @@ import (
 const (
 	ReasonWrongNamespace       = "WrongNamespace"
 	ReasonHostNotInZone        = "HostNotInZone"
+	ReasonZoneNotOwned         = "ZoneNotOwned"
 	ReasonHandlerNotEnabled    = "HandlerNotEnabled"
 	ReasonErrorsAmbiguous      = "ErrorHandlersAmbiguous"
 	ReasonAppNotPinned         = "AppNotPinned"
@@ -83,8 +84,13 @@ func Hosts(site *authv1.Site, cfg *config.Config, zones []authv1.Zone) *Refusal 
 		return refuse(ReasonWrongNamespace, "sites must live in the gateway namespace %q", cfg.GatewayNamespace)
 	}
 	for _, h := range site.Spec.Hosts {
-		if HostZone(h, zones) == nil {
+		z := HostZone(h, zones)
+		if z == nil {
 			return refuse(ReasonHostNotInZone, "host %q is not one label under a Zone domain", h)
+		}
+		if !cfg.OwnsZone(z.Name) {
+			return refuse(ReasonZoneNotOwned, "host %q is under zone %q, which this operator does not reconcile (--zones %s); nothing was written",
+				h, z.Name, strings.Join(cfg.Zones, ","))
 		}
 		if !site.Spec.System && slices.Contains(cfg.ReservedHosts, h) {
 			return refuse(ReasonHostReserved, "host %q is reserved for system sites", h)

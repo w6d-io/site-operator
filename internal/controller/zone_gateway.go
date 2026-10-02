@@ -189,7 +189,7 @@ func listenerSetReady(ls *unstructured.Unstructured) (bool, string, string) {
 	return true, "", ""
 }
 
-// zonesForGateway re-reconciles the Zones attached to a Gateway.
+// zonesForGateway re-reconciles the owned Zones attached to a Gateway.
 func (r *ZoneReconciler) zonesForGateway(ctx context.Context, o client.Object) []reconcile.Request {
 	var zones authv1.ZoneList
 	if err := r.List(ctx, &zones); err != nil {
@@ -197,7 +197,7 @@ func (r *ZoneReconciler) zonesForGateway(ctx context.Context, o client.Object) [
 	}
 	var out []reconcile.Request
 	for _, z := range zones.Items {
-		if g := z.Spec.Gateway; g != nil && g.Namespace == o.GetNamespace() && g.Name == o.GetName() {
+		if g := z.Spec.Gateway; g != nil && g.Namespace == o.GetNamespace() && g.Name == o.GetName() && r.Config.OwnsZone(z.Name) {
 			out = append(out, reconcile.Request{NamespacedName: client.ObjectKey{Name: z.Name}})
 		}
 	}

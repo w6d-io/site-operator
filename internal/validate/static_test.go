@@ -141,3 +141,34 @@ func TestNoZoneNoSite(t *testing.T) {
 		t.Fatalf("a site with no Zone defined must be refused, got %v", got)
 	}
 }
+
+func TestHostsUnderAZoneNotOwned(t *testing.T) {
+	cfg := config.Default()
+	sandbox := func(s *authv1.Site) { s.Spec.Hosts = []string{"shop.authdev.dev.example.com"} }
+	cases := []struct {
+		name   string
+		zones  []string
+		mutate func(*authv1.Site)
+		reason string
+	}{
+		{"no --zones owns every zone", nil, func(*authv1.Site) {}, ""},
+		{"owned zone", []string{"dev"}, func(*authv1.Site) {}, ""},
+		{"zone of another release", []string{"sandbox"}, func(*authv1.Site) {}, ReasonZoneNotOwned},
+		{"nested zone owned, parent not", []string{"sandbox"}, sandbox, ""},
+		{"parent owned, nested zone not", []string{"dev"}, sandbox, ReasonZoneNotOwned},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg.Zones = c.zones
+			s := site()
+			c.mutate(s)
+			ref := Hosts(s, cfg, zones)
+			switch {
+			case c.reason == "" && ref != nil:
+				t.Fatalf("unexpected refusal %v", ref)
+			case c.reason != "" && (ref == nil || ref.Reason != c.reason):
+				t.Fatalf("want %s, got %v", c.reason, ref)
+			}
+		})
+	}
+}

@@ -113,7 +113,7 @@ func main() {
 	}
 	_ = mgr.AddHealthzCheck("healthz", healthz.Ping)
 	_ = mgr.AddReadyzCheck("readyz", healthz.Ping)
-	log.Info("starting", "namespace", cfg.GatewayNamespace, "gatekit", cfg.GatekitURL, "gatewayAPI", cfg.EnableGatewayAPI, "gateways", cfg.Gateways)
+	log.Info("starting", "namespace", cfg.GatewayNamespace, "gatekit", cfg.GatekitURL, "gatewayAPI", cfg.EnableGatewayAPI, "gateways", cfg.Gateways, "zones", cfg.Zones)
 	if err := mgr.Start(ctrl.SetupSignalHandler()); err != nil {
 		log.Error(err, "manager exited")
 		os.Exit(1)

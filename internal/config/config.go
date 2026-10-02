@@ -7,11 +7,13 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"slices"
 	"strconv"
 	"strings"
 	"time"
 
 	"k8s.io/apimachinery/pkg/labels"
+	"k8s.io/apimachinery/pkg/util/validation"
 )
 
 // Config is the operator configuration (flags, each with an env fallback).
@@ -39,6 +41,10 @@ type Config struct {
 	// ZonesConfigMap is the ConfigMap (gateway namespace) the operator mirrors Zone
 	// domains into, for the admission policy.
 	ZonesConfigMap string
+	// Zones, when set, are the only Zones (by name) this operator reconciles, so two
+	// releases on one cluster never write each other's Zone status or children; a
+	// Site whose host is under another Zone is refused (ZoneNotOwned). Empty: all Zones.
+	Zones []string
 	// PausedRedirectURL, when set, is where browsers hitting a paused Site are
 	// sent (?site=<name> is appended); JSON clients always get the json error.
 	PausedRedirectURL string
@@ -112,6 +118,7 @@ func Register(fs *flag.FlagSet) *Raw {
 	s(&r.EnabledErrors, "enabled-errors", "json,redirect", "globally enabled error handlers")
 	s(&r.RulesConfigMap, "rules-configmap", "", "maester configMapName written into every Rule (empty: sidecar mode)")
 	s(&r.ZonesConfigMap, "zones-configmap", "site-operator-zones", "ConfigMap the Zone domains are mirrored into for admission")
+	s(&r.Zones, "zones", "", "comma-separated Zone names this operator reconciles (empty: every Zone)")
 	s(&r.PausedRedirectURL, "paused-redirect-url", "", "page browsers see for a paused site (empty: json error only)")
 	s(&r.GatekitURL, "gatekit-url", "http://gatekit:8080", "gatekit base URL")
 	fs.BoolVar(&r.EnableCertificates, "enable-certificates", env("enable-certificates", "true") == "true", "manage cert-manager Certificates")
@@ -140,6 +147,7 @@ type Raw struct {
 	EnabledAuthenticators, EnabledAuthorizers                     string
 	EnabledMutators, EnabledErrors                                string
 	RulesConfigMap, ZonesConfigMap, GatekitURL, PausedRedirectURL string
+	Zones                                                         string
 	GatewayPods, GatewayAPIPort, RulesLoadedTimeout               string
 	GatewayDeployment, GatewayConfigPrefix, GatewayBaseConfigMap  string
 	GatewayConfigVolume                                           string
@@ -164,6 +172,7 @@ func (r *Raw) Load() (*Config, error) {
 		EnabledErrors:         list(r.EnabledErrors),
 		RulesConfigMap:        r.RulesConfigMap,
 		ZonesConfigMap:        r.ZonesConfigMap,
+		Zones:                 list(r.Zones),
 		GatekitURL:            strings.TrimRight(r.GatekitURL, "/"),
 		PausedRedirectURL:     r.PausedRedirectURL,
 		EnableCertificates:    r.EnableCertificates,
@@ -185,6 +194,11 @@ func (r *Raw) Load() (*Config, error) {
 	}
 	if len(c.IngressClasses) == 0 || len(c.Issuers) == 0 {
 		return nil, fmt.Errorf("ingress-classes and issuers must not be empty")
+	}
+	for _, z := range c.Zones {
+		if errs := validation.IsDNS1123Subdomain(z); len(errs) > 0 {
+			return nil, fmt.Errorf("zones: %q is not a Zone name: %s", z, strings.Join(errs, "; "))
+		}
 	}
 	for _, g := range c.Gateways {
 		if ns, name, ok := strings.Cut(g, "/"); !ok || ns == "" || name == "" || strings.Contains(name, "/") {
@@ -223,6 +237,12 @@ func (r *Raw) Load() (*Config, error) {
 		return nil, fmt.Errorf("denied-upstream: %w", err)
 	}
 	return c, nil
+}
+
+// OwnsZone reports whether this operator reconciles the Zone named name: every
+// Zone when no --zones are set.
+func (c *Config) OwnsZone(name string) bool {
+	return len(c.Zones) == 0 || slices.Contains(c.Zones, name)
 }
 
 // Default returns the configuration built from the flag defaults (used by tests).

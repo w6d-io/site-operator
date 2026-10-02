@@ -30,6 +30,16 @@ exactly one DNS label under a Zone domain (a wildcard certificate covers one lab
 adds a per-site Ingress from the fixed template, with `tls: per-site` for its own Certificate. The operator mirrors the Zone domains into ConfigMap `site-operator-zones`
 (RBAC: update by name only), which the `site-operator-hosts` admission policy reads.
 
+**Several releases on one cluster.** Zones are cluster-scoped, so by default every
+operator reconciles every Zone. Give each release its own Zones with `--zones=<name>,<name>`
+(env `SITE_OPERATOR_ZONES`; the chart fills it from `sites.zones`): the operator then
+watches, writes status for, and renders children (Ingress, Certificate, ListenerSet) of the
+listed Zones only, and mirrors only their domains into its `site-operator-zones`. Another
+release's Zone is left alone (its domain still counts for `DomainTaken`). A Site in the
+operator's namespace whose host is under a Zone it does not own is refused with
+`Validated=False ZoneNotOwned` and nothing is written for it. Empty `--zones` (default)
+reconciles every Zone, as before.
+
 `ingress: per-site` (default `wildcard`) is for a domain other Ingresses in the cluster
 already use (e.g. the sandbox on `dev.example.com`): the Zone renders **no** wildcard
 Ingress (`IngressReady=True PerSite`); each **host** under it gets one exact-host Ingress
